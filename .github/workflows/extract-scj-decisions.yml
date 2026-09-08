@@ -1,0 +1,171 @@
+name: Extract ÎCCJ Court Decisions
+
+on:
+  schedule:
+    - cron: '0 4 * * *' # Run daily at 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Specific release tag to publish (default: decisions/YYYY-MM-DD)'
+        required: false
+        type: string
+      max_pages_per_shard:
+        description: 'Maximum search pages to scrape per shard'
+        required: false
+        default: '200'
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 0
+            dept: "Secția I Civilă"
+          - shard: 1
+            dept: "Secția a II-a Civilă"
+          - shard: 2
+            dept: "Secția Penală"
+          - shard: 3
+            dept: "Secția de Contencios Administrativ și Fiscal"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Download existing cache
+        run: |
+          mkdir -p data/cache
+          gh release download decisions-cache --pattern 'swept_ids.parquet' --dir data/cache || echo "Initial run, no cache available yet."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract decisions for ${{ matrix.dept }}
+        run: |
+          uv run python -m etl.extract \
+            --shard ${{ matrix.shard }} \
+            --total-shards 4 \
+            --dept "${{ matrix.dept }}" \
+            --max-pages ${{ inputs.max_pages_per_shard || 200 }}
+
+      - name: Upload shard raw parquet artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-shard-${{ matrix.shard }}
+          path: data/raw/*.parquet
+          if-no-files-found: ignore
+
+  publish:
+    needs: extract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: raw-shard-*
+          path: data/raw
+          merge-multiple: true
+
+      - name: Transform, Parse Citations & Validate Schemas
+        run: |
+          uv run python -m etl.transform
+
+      - name: Run Test Suite
+        run: |
+          uv run pytest -v
+
+      - name: Build DuckDB Full-Text Search (FTS) Index
+        run: |
+          uv run python -m etl.fts
+
+      - name: Prepare Release Assets & Checksums
+        id: prep
+        run: |
+          cp create_views.sql data/create_views.sql
+          cd data
+          # Compress FTS index with zstd and split into <1900MB parts for GitHub Release limit
+          if [ -f "fts.duckdb" ]; then
+            zstd -3 -f --quiet --rm fts.duckdb -o fts.duckdb.zst
+            split -b 1900M -d -a 2 fts.duckdb.zst fts.duckdb.zst.part-
+            rm fts.duckdb.zst
+          fi
+          
+          sha256sum decisions.parquet decision_paragraphs.parquet relationships.parquet fts.duckdb.zst.part-* create_views.sql > decisions.sha256
+          
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="decisions/$(date -u +%Y-%m-%d)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Compute Corpus Statistics
+        id: stats
+        run: |
+          uv run python -c "
+          import duckdb
+          c = duckdb.connect()
+          decisions_cnt = c.execute('SELECT count(*) FROM read_parquet(\"data/decisions.parquet\")').fetchone()[0]
+          paragraphs_cnt = c.execute('SELECT count(*) FROM read_parquet(\"data/decision_paragraphs.parquet\")').fetchone()[0]
+          relationships_cnt = c.execute('SELECT count(*) FROM read_parquet(\"data/relationships.parquet\")').fetchone()[0]
+          print(f'decisions={decisions_cnt}')
+          print(f'paragraphs={paragraphs_cnt}')
+          print(f'relationships={relationships_cnt}')
+          " >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.prep.outputs.tag }}"
+          
+          cd data
+          gh release create "$TAG" \
+            decisions.parquet \
+            decision_paragraphs.parquet \
+            relationships.parquet \
+            fts.duckdb.zst.part-* \
+            create_views.sql \
+            decisions.sha256 \
+            --title "$TAG" \
+            --notes "$(cat <<EOF
+          Romanian High Court of Cassation and Justice (ÎCCJ) Jurisprudence Snapshot.
+
+          ### Summary Statistics:
+          - **Total Decisions:** ${{ steps.stats.outputs.decisions }}
+          - **Total Paragraphs:** ${{ steps.stats.outputs.paragraphs }}
+          - **Legal Citations / Relationships:** ${{ steps.stats.outputs.relationships }}
+
+          ### How to Reassemble Full-Text Search (DuckDB):
+          \`\`\`bash
+          cat fts.duckdb.zst.part-* | zstd -d > fts.duckdb
+          \`\`\`
+          EOF
+          )"
