@@ -2,7 +2,7 @@ name: Extract ÎCCJ Court Decisions
 
 on:
   schedule:
-    - cron: '0 4 * * *' # Run daily at 04:00 UTC
+    - cron: '30 1 * * *' # 04:30 AM Romanian Time (EEST) / 03:30 AM (EET) # Run daily at 04:00 UTC
   workflow_dispatch:
     inputs:
       release_tag:
