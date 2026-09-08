@@ -54,9 +54,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Romanian Judicial Case Law & Legal Templates API",
-    description="High-performance legal intelligence API over Romanian High Court rulings, bidirectional legislation liaison graph, and document templates from legeaz.net.",
-    version="0.2.0",
+    title="Romanian Judicial Case Law, Legal Templates & Dictionary API",
+    description="High-performance legal intelligence API over Romanian High Court rulings, bidirectional legislation liaison graph, document templates, and legal dictionary definitions from legeaz.net.",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -74,6 +74,7 @@ class HealthResponse(BaseModel):
     has_fts: bool
     has_decisions: bool
     has_modele: bool
+    has_dictionar: bool
 
 
 class StatsResponse(BaseModel):
@@ -81,6 +82,7 @@ class StatsResponse(BaseModel):
     total_paragraphs: int
     total_citations: int
     total_modele: int
+    total_dictionar_terms: int
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -90,6 +92,7 @@ def health_check():
         "has_fts": FTS_DB_PATH.exists(),
         "has_decisions": (DATA_DIR / "decisions.parquet").exists(),
         "has_modele": (DATA_DIR / "modele_documente.parquet").exists(),
+        "has_dictionar": (DATA_DIR / "dictionar_juridic.parquet").exists(),
     }
 
 
@@ -100,17 +103,20 @@ def get_stats():
     para_file = DATA_DIR / "decision_paragraphs.parquet"
     rel_file = DATA_DIR / "relationships.parquet"
     mod_file = DATA_DIR / "modele_documente.parquet"
+    dict_file = DATA_DIR / "dictionar_juridic.parquet"
 
     dec_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dec_file}')").fetchone()[0] if dec_file.exists() else 0
     para_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{para_file}')").fetchone()[0] if para_file.exists() else 0
     rel_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{rel_file}')").fetchone()[0] if rel_file.exists() else 0
     mod_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{mod_file}')").fetchone()[0] if mod_file.exists() else 0
+    dict_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dict_file}')").fetchone()[0] if dict_file.exists() else 0
 
     return {
         "total_decisions": dec_cnt,
         "total_paragraphs": para_cnt,
         "total_citations": rel_cnt,
         "total_modele": mod_cnt,
+        "total_dictionar_terms": dict_cnt,
     }
 
 
@@ -449,5 +455,85 @@ def get_document_template(template_id: int):
     results = db.execute(f"SELECT * FROM read_parquet('{mod_file}') WHERE id = ?", [template_id]).pl().to_dicts()
     if not results:
         raise HTTPException(status_code=404, detail="Document template not found")
+
+    return results[0]
+
+
+# =============================================================================
+# Legal Dictionary Endpoints (Dicționar Juridic DEX)
+# =============================================================================
+
+@app.get("/api/v1/dictionar/letters", tags=["Dicționar Juridic"])
+def list_dictionary_letters():
+    """List all available letters in the legal dictionary and term counts."""
+    db = get_db_connection()
+    dict_file = DATA_DIR / "dictionar_juridic.parquet"
+    if not dict_file.exists():
+        return {"letters": []}
+
+    results = db.execute(f"""
+        SELECT letter, count(*) as count
+        FROM read_parquet('{dict_file}')
+        GROUP BY letter
+        ORDER BY letter ASC
+    """).pl().to_dicts()
+
+    return {"letters": results}
+
+
+@app.get("/api/v1/dictionar", tags=["Dicționar Juridic"])
+def list_dictionary_terms(
+    letter: str | None = Query(None, max_length=2, description="Alphabet letter filter (e.g. 'A', 'B', 'C')"),
+    q: str | None = Query(None, description="Search term in name or definition"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List and search legal dictionary definitions."""
+    db = get_db_connection()
+    dict_file = DATA_DIR / "dictionar_juridic.parquet"
+    if not dict_file.exists():
+        return {"count": 0, "page": page, "limit": limit, "data": []}
+
+    conditions = ["1=1"]
+    params = []
+
+    if letter:
+        conditions.append("letter = ?")
+        params.append(letter.upper())
+    if q:
+        conditions.append("(term ILIKE ? OR definition ILIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%"])
+
+    where_clause = " AND ".join(conditions)
+    offset = (page - 1) * limit
+
+    query = f"""
+        SELECT id, slug, term, letter, definition, link
+        FROM read_parquet('{dict_file}')
+        WHERE {where_clause}
+        ORDER BY term ASC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+
+    results = db.execute(query, params).pl().to_dicts()
+    return {"count": len(results), "page": page, "limit": limit, "data": results}
+
+
+@app.get("/api/v1/dictionar/{term_id_or_slug}", tags=["Dicționar Juridic"])
+def get_dictionary_term_detail(term_id_or_slug: str):
+    """Retrieve full definition for a specific legal dictionary term."""
+    db = get_db_connection()
+    dict_file = DATA_DIR / "dictionar_juridic.parquet"
+    if not dict_file.exists():
+        raise HTTPException(status_code=404, detail="Dictionary dataset not loaded")
+
+    if term_id_or_slug.isdigit():
+        results = db.execute(f"SELECT * FROM read_parquet('{dict_file}') WHERE id = ?", [int(term_id_or_slug)]).pl().to_dicts()
+    else:
+        results = db.execute(f"SELECT * FROM read_parquet('{dict_file}') WHERE slug = ?", [term_id_or_slug]).pl().to_dicts()
+
+    if not results:
+        raise HTTPException(status_code=404, detail="Dictionary term not found")
 
     return results[0]

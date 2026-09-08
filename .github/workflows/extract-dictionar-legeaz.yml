@@ -1,0 +1,53 @@
+name: Extract Legal Dictionary (legeaz.net)
+
+on:
+  schedule:
+    - cron: '0 2 * * 6' # Weekly on Saturday at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: 'Maximum dictionary pages to crawl (1-104)'
+        required: false
+        default: '104'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  extract-dictionar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Download existing dictionary cache
+        run: |
+          mkdir -p data/cache
+          gh release download decisions-cache --pattern 'swept_dictionar_urls.parquet' --dir data/cache || echo "No previous dictionary cache."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Legal Dictionary Extractor
+        run: |
+          uv run python -m etl.extract_dictionar --max-pages ${{ inputs.max_pages || 104 }}
+
+      - name: Update GitHub Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="decisions/$(date -u +%Y-%m-%d)"
+          if [ -f "data/dictionar_juridic.parquet" ]; then
+            gh release upload "$TAG" data/dictionar_juridic.parquet --clobber || \
+            gh release upload latest data/dictionar_juridic.parquet --clobber || echo "No release available to attach to yet."
+          fi

@@ -18,6 +18,10 @@ extract-dump path:
 extract-modele pages="18":
     uv run python -m etl.extract_modele --max-pages {{pages}}
 
+# Extract legal dictionary definitions from legeaz.net
+extract-dictionar pages="104":
+    uv run python -m etl.extract_dictionar --max-pages {{pages}}
+
 # Run ETL transform (cleans, parses citations, validates with Pandera, outputs parquet)
 transform:
     uv run python -m etl.transform

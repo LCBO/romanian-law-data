@@ -68,3 +68,17 @@ class DocumentTemplateSchema(pa.DataFrameModel):
     class Config:
         strict = True
         coerce = True
+
+
+class DictionaryTermSchema(pa.DataFrameModel):
+    id: int = pa.Field(unique=True)
+    slug: str = pa.Field(nullable=False)
+    term: str = pa.Field(nullable=False)
+    letter: str = pa.Field(nullable=False)
+    definition: str = pa.Field(nullable=False)
+    link: str = pa.Field(nullable=False)
+    synced_at: pl.Datetime = pa.Field(nullable=False)
+
+    class Config:
+        strict = True
+        coerce = True

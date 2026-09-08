@@ -1,6 +1,6 @@
 -- =============================================================================
--- Views and helper macros for Romanian High Court of Cassation & Justice (ÎCCJ)
--- and Legal Document Templates (Modele de Documente Juridice)
+-- Views and helper macros for Romanian High Court of Cassation & Justice (ÎCCJ),
+-- Legal Document Templates (Modele de Acte), and Legal Dictionary (Dicționar Juridic)
 -- Compatible with DuckDB and Parquet storage
 -- =============================================================================
 
@@ -17,6 +17,10 @@ SELECT * FROM read_parquet('data/relationships.parquet');
 -- Modele de Documente Juridice (legeaz.net)
 CREATE OR REPLACE VIEW modele_documente AS 
 SELECT * FROM read_parquet('data/modele_documente.parquet');
+
+-- Dicționar Juridic DEX (legeaz.net)
+CREATE OR REPLACE VIEW dictionar_juridic AS 
+SELECT * FROM read_parquet('data/dictionar_juridic.parquet');
 
 -- =============================================================================
 -- Legislation Liaison (Bidirectional Citation & Relationship Graph)

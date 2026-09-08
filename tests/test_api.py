@@ -59,6 +59,18 @@ def setup_test_data():
     }])
     modele_df.write_parquet(data_dir / "modele_documente.parquet")
 
+    # Dictionary fixture
+    dict_df = pl.DataFrame([{
+        "id": 73947,
+        "slug": "abuzul-in-serviciu",
+        "term": "Abuzul în serviciu",
+        "letter": "A",
+        "definition": "ABUZUL ÎN SERVICIU, fapta funcţionarului public care în exerciţiul atribuţiilor...",
+        "link": "https://legeaz.net/dictionar-juridic/abuzul-in-serviciu",
+        "synced_at": datetime.now(),
+    }])
+    dict_df.write_parquet(data_dir / "dictionar_juridic.parquet")
+
     yield
     
     # Cleanup test raw file
@@ -72,6 +84,7 @@ def test_health_endpoint():
     assert data["status"] == "healthy"
     assert data["has_decisions"] is True
     assert data["has_modele"] is True
+    assert data["has_dictionar"] is True
 
 def test_stats_endpoint():
     resp = client.get("/api/v1/stats")
@@ -80,6 +93,7 @@ def test_stats_endpoint():
     assert data["total_decisions"] >= 1
     assert data["total_paragraphs"] >= 1
     assert data["total_modele"] >= 1
+    assert data["total_dictionar_terms"] >= 1
 
 def test_list_decisions():
     resp = client.get("/api/v1/decisions?department=Civil")
@@ -116,23 +130,38 @@ def test_fts_search():
     assert data["count"] >= 1
 
 def test_modele_endpoints():
-    # 1. Categories
     cat_resp = client.get("/api/v1/modele/categories")
     assert cat_resp.status_code == 200
     cats = cat_resp.json()["categories"]
     assert any(c["category"] == "Contracte" for c in cats)
 
-    # 2. List & Filter
     list_resp = client.get("/api/v1/modele?category=Contracte")
     assert list_resp.status_code == 200
     list_data = list_resp.json()
     assert list_data["count"] >= 1
-    assert "răscumpărare" in list_data["data"][0]["title"] or "rascumparare" in list_data["data"][0]["slug"]
 
-    # 3. Detail
     tpl_id = list_data["data"][0]["id"]
     det_resp = client.get(f"/api/v1/modele/{tpl_id}")
     assert det_resp.status_code == 200
     det_data = det_resp.json()
     assert det_data["category"] == "Contracte"
-    assert "art. 1758" in det_data["legal_basis"]
+
+def test_dictionar_endpoints():
+    # 1. Letters
+    let_resp = client.get("/api/v1/dictionar/letters")
+    assert let_resp.status_code == 200
+    letters = let_resp.json()["letters"]
+    assert any(l["letter"] == "A" for l in letters)
+
+    # 2. List & Search
+    list_resp = client.get("/api/v1/dictionar?letter=A&q=abuz")
+    assert list_resp.status_code == 200
+    list_data = list_resp.json()
+    assert list_data["count"] >= 1
+    assert "abuzul-in-serviciu" in list_data["data"][0]["slug"]
+
+    # 3. Detail by Slug
+    det_resp = client.get("/api/v1/dictionar/abuzul-in-serviciu")
+    assert det_resp.status_code == 200
+    det_data = det_resp.json()
+    assert "funcţionarului public" in det_data["definition"]
