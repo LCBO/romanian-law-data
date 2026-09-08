@@ -38,9 +38,16 @@ class ParagraphSchema(pa.DataFrameModel):
 class RelationshipSchema(pa.DataFrameModel):
     id: int = pa.Field(unique=True)
     source_decision_id: int = pa.Field()
-    target_type: str = pa.Field()  # 'LAW', 'ARTICLE', 'CCR_DECISION', 'ICCJ_DECISION', 'ECHR'
-    target_citation: str = pa.Field()
-    relationship_type: str = pa.Field()  # 'applies', 'interprets', 'cites', 'overrules'
+    target_type: str = pa.Field()  # 'LAW', 'CODE', 'CCR_DECISION', 'ICCJ_DECISION', 'REGULATION', 'ECHR'
+    act_type: str = pa.Field(nullable=True)  # 'LEGE', 'OUG', 'OG', 'HG', 'ORDIN', 'COD', etc.
+    act_number: str = pa.Field(nullable=True)
+    act_year: int = pa.Field(nullable=True)
+    article_number: str = pa.Field(nullable=True)
+    paragraph_number: str = pa.Field(nullable=True)
+    annex: str = pa.Field(nullable=True)
+    chapter: str = pa.Field(nullable=True)
+    canonical_citation: str = pa.Field(nullable=False)
+    relationship_type: str = pa.Field(nullable=False)  # 'applies', 'interprets', 'cites', 'overrules'
 
     class Config:
         strict = True

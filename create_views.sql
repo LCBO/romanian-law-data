@@ -14,6 +14,54 @@ CREATE OR REPLACE VIEW relationships AS
 SELECT * FROM read_parquet('data/relationships.parquet');
 
 -- =============================================================================
+-- Legislation Liaison (Bidirectional Citation & Relationship Graph)
+-- =============================================================================
+
+-- 1. Given a decision, list all referenced normative acts, codes, and articles
+CREATE OR REPLACE VIEW decision_to_legislation_view AS
+SELECT 
+    d.id AS decision_id,
+    d.decision_number,
+    d.decision_date,
+    d.docket_number,
+    d.department,
+    r.target_type,
+    r.act_type,
+    r.act_number,
+    r.act_year,
+    r.article_number,
+    r.paragraph_number,
+    r.annex,
+    r.chapter,
+    r.canonical_citation,
+    r.relationship_type
+FROM decisions d
+JOIN relationships r ON d.id = r.source_decision_id;
+
+-- 2. Given a law, code, or article, list all court decisions citing or applying it
+CREATE OR REPLACE VIEW legislation_to_decisions_view AS
+SELECT 
+    r.canonical_citation,
+    r.target_type,
+    r.act_type,
+    r.act_number,
+    r.act_year,
+    r.article_number,
+    r.paragraph_number,
+    r.annex,
+    r.chapter,
+    d.id AS decision_id,
+    d.decision_number,
+    d.decision_date,
+    d.docket_number,
+    d.department,
+    d.solution_type,
+    d.summary,
+    d.link
+FROM relationships r
+JOIN decisions d ON r.source_decision_id = d.id;
+
+-- =============================================================================
 -- Domain Views (Specialized Court Sections / Secții ÎCCJ)
 -- =============================================================================
 
@@ -45,14 +93,14 @@ WHERE department ILIKE '%Contencios%' OR department ILIKE '%Fiscal%';
 CREATE OR REPLACE VIEW ril_decisions AS
 SELECT * FROM decisions 
 WHERE document_type ILIKE '%recurs în interesul legii%' 
-   OR title ILIKE '%recurs în interesul legii%'
+   OR summary ILIKE '%recurs în interesul legii%'
    OR keywords ILIKE '%RIL%';
 
 -- Hotărâri Prealabile pentru dezlegarea unor chestiuni de drept (Preliminary Rulings)
 CREATE OR REPLACE VIEW hp_decisions AS
 SELECT * FROM decisions 
 WHERE document_type ILIKE '%hotărâre prealabilă%' 
-   OR title ILIKE '%dezlegarea unor chestiuni de drept%'
+   OR summary ILIKE '%dezlegarea unor chestiuni de drept%'
    OR keywords ILIKE '%hotarare prealabila%';
 
 -- Recent Rulings (Last 12 Months)

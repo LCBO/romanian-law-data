@@ -1,11 +1,11 @@
 import ast
 import hashlib
 import logging
-import re
 from datetime import datetime, date
 from pathlib import Path
 import polars as pl
 
+from etl.citations import extract_citations
 from etl.schemas import DecisionSchema, ParagraphSchema, RelationshipSchema
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -13,13 +13,6 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path("data")
 RAW_DATA_DIR = Path("data/raw")
-
-CITATION_REGEXES = [
-    (r"(?:art\.|articolul)\s*(\d+)\s*(?:alin\.|alineatul\s*\(\d+\))?\s*din\s*(Legea|OUG|OG|Hotărârea\s*Guvernului|Codul\s*penal|Codul\s*civil|Codul\s*fiscal|Codul\s*de\s*procedură\s*civilă|Codul\s*de\s*procedură\s*penală)(?:\s*nr\.\s*(\d+/\d+))?", "LAW"),
-    (r"Decizi(?:a|ei)\s*(?:Curții\s*Constituționale|C\.C\.R\.|CCR)\s*nr\.\s*(\d+/\d+|\d+)", "CCR_DECISION"),
-    (r"Decizi(?:a|ei)\s*(?:Î\.C\.C\.J\.|ÎCCJ|Înaltei\s*Curți)\s*nr\.\s*(\d+/\d+|\d+)", "ICCJ_DECISION"),
-    (r"Cauza\s*([A-Z][a-zăîșțâ]+(?:\s*[a-zăîșțâ]+)*\s*(?:împotriva|v\.)\s*României)", "ECHR"),
-]
 
 
 def parse_date(date_str: str | None) -> date | None:
@@ -31,20 +24,6 @@ def parse_date(date_str: str | None) -> date | None:
         except ValueError:
             continue
     return None
-
-
-def extract_relationships(decision_id: int, text: str) -> list[dict]:
-    rels = []
-    for pattern, target_type in CITATION_REGEXES:
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            citation_text = match.group(0).strip()
-            rels.append({
-                "source_decision_id": decision_id,
-                "target_type": target_type,
-                "target_citation": citation_text,
-                "relationship_type": "applies",
-            })
-    return rels
 
 
 def run_transform():
@@ -109,8 +88,8 @@ def run_transform():
             })
             global_para_id += 1
 
-        # Extract legal citations & relationships
-        rels = extract_relationships(dec_id, content)
+        # Extract structured legal citations & legislation liaison
+        rels = extract_citations(dec_id, content)
         for r in rels:
             r["id"] = global_rel_id
             relationships_list.append(r)
@@ -129,7 +108,14 @@ def run_transform():
         "id": pl.Series(dtype=pl.Int64),
         "source_decision_id": pl.Series(dtype=pl.Int64),
         "target_type": pl.Series(dtype=pl.Utf8),
-        "target_citation": pl.Series(dtype=pl.Utf8),
+        "act_type": pl.Series(dtype=pl.Utf8),
+        "act_number": pl.Series(dtype=pl.Utf8),
+        "act_year": pl.Series(dtype=pl.Int64),
+        "article_number": pl.Series(dtype=pl.Utf8),
+        "paragraph_number": pl.Series(dtype=pl.Utf8),
+        "annex": pl.Series(dtype=pl.Utf8),
+        "chapter": pl.Series(dtype=pl.Utf8),
+        "canonical_citation": pl.Series(dtype=pl.Utf8),
         "relationship_type": pl.Series(dtype=pl.Utf8),
     })
 
