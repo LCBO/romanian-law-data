@@ -1,5 +1,6 @@
 -- =============================================================================
 -- Views and helper macros for Romanian High Court of Cassation & Justice (ÎCCJ)
+-- and Legal Document Templates (Modele de Documente Juridice)
 -- Compatible with DuckDB and Parquet storage
 -- =============================================================================
 
@@ -12,6 +13,10 @@ SELECT * FROM read_parquet('data/decision_paragraphs.parquet');
 
 CREATE OR REPLACE VIEW relationships AS 
 SELECT * FROM read_parquet('data/relationships.parquet');
+
+-- Modele de Documente Juridice (legeaz.net)
+CREATE OR REPLACE VIEW modele_documente AS 
+SELECT * FROM read_parquet('data/modele_documente.parquet');
 
 -- =============================================================================
 -- Legislation Liaison (Bidirectional Citation & Relationship Graph)
@@ -108,3 +113,27 @@ CREATE OR REPLACE VIEW recent_decisions AS
 SELECT * FROM decisions 
 WHERE decision_date >= (CURRENT_DATE - INTERVAL 1 YEAR)
 ORDER BY decision_date DESC;
+
+-- =============================================================================
+-- Specialized Views for Modele de Documente
+-- =============================================================================
+
+-- Modele de Contracte (Vânzare, Închiriere, Împrumut, Donație, Cesiune, etc.)
+CREATE OR REPLACE VIEW modele_contracte AS
+SELECT * FROM modele_documente
+WHERE category = 'Contracte';
+
+-- Modele de Cereri & Acțiuni în Justiție
+CREATE OR REPLACE VIEW modele_cereri_justitie AS
+SELECT * FROM modele_documente
+WHERE category = 'Cereri & Acțiuni în Justiție' OR category = 'Plângeri & Contestații';
+
+-- Modele Succesiuni & Moșteniri
+CREATE OR REPLACE VIEW modele_succesiuni AS
+SELECT * FROM modele_documente
+WHERE category = 'Succesiuni & Testamente';
+
+-- Modele Dreptul Familiei (Convenții matrimoniale, divorț, tutelă)
+CREATE OR REPLACE VIEW modele_familie AS
+SELECT * FROM modele_documente
+WHERE category = 'Dreptul Familiei';

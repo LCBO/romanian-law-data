@@ -54,9 +54,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Romanian Court Decisions API (ÎCCJ Jurisprudence)",
-    description="High-performance legal intelligence API over Romanian High Court of Cassation and Justice rulings, paragraphs, and bidirectional citation graphs.",
-    version="0.1.0",
+    title="Romanian Judicial Case Law & Legal Templates API",
+    description="High-performance legal intelligence API over Romanian High Court rulings, bidirectional legislation liaison graph, and document templates from legeaz.net.",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -72,13 +72,15 @@ app.add_middleware(
 class HealthResponse(BaseModel):
     status: str
     has_fts: bool
-    has_parquet: bool
+    has_decisions: bool
+    has_modele: bool
 
 
 class StatsResponse(BaseModel):
     total_decisions: int
     total_paragraphs: int
     total_citations: int
+    total_modele: int
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -86,7 +88,8 @@ def health_check():
     return {
         "status": "healthy",
         "has_fts": FTS_DB_PATH.exists(),
-        "has_parquet": (DATA_DIR / "decisions.parquet").exists(),
+        "has_decisions": (DATA_DIR / "decisions.parquet").exists(),
+        "has_modele": (DATA_DIR / "modele_documente.parquet").exists(),
     }
 
 
@@ -96,24 +99,24 @@ def get_stats():
     dec_file = DATA_DIR / "decisions.parquet"
     para_file = DATA_DIR / "decision_paragraphs.parquet"
     rel_file = DATA_DIR / "relationships.parquet"
+    mod_file = DATA_DIR / "modele_documente.parquet"
 
-    if not dec_file.exists():
-        return {"total_decisions": 0, "total_paragraphs": 0, "total_citations": 0}
+    dec_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dec_file}')").fetchone()[0] if dec_file.exists() else 0
+    para_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{para_file}')").fetchone()[0] if para_file.exists() else 0
+    rel_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{rel_file}')").fetchone()[0] if rel_file.exists() else 0
+    mod_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{mod_file}')").fetchone()[0] if mod_file.exists() else 0
 
-    try:
-        dec_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dec_file}')").fetchone()[0]
-        para_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{para_file}')").fetchone()[0] if para_file.exists() else 0
-        rel_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{rel_file}')").fetchone()[0] if rel_file.exists() else 0
-        
-        return {
-            "total_decisions": dec_cnt,
-            "total_paragraphs": para_cnt,
-            "total_citations": rel_cnt,
-        }
-    except Exception as e:
-        logger.error(f"Error fetching stats: {e}")
-        return {"total_decisions": 0, "total_paragraphs": 0, "total_citations": 0}
+    return {
+        "total_decisions": dec_cnt,
+        "total_paragraphs": para_cnt,
+        "total_citations": rel_cnt,
+        "total_modele": mod_cnt,
+    }
 
+
+# =============================================================================
+# Court Decisions Endpoints
+# =============================================================================
 
 @app.get("/api/v1/decisions", tags=["Decisions"])
 def list_decisions(
@@ -309,7 +312,6 @@ def full_text_search(
     if not dec_file.exists():
         return {"query": q, "mode": "none", "count": 0, "data": []}
 
-    # Check if FTS index table exists
     has_fts_table = False
     try:
         tables = [t[0] for t in db.execute("SHOW TABLES").fetchall()]
@@ -373,3 +375,79 @@ def full_text_search(
     """, params).pl().to_dicts()
 
     return {"query": q, "mode": "columnar_search", "count": len(res), "data": res}
+
+
+# =============================================================================
+# Document Templates Endpoints (Modele de Acte / Contracte)
+# =============================================================================
+
+@app.get("/api/v1/modele/categories", tags=["Modele de Documente"])
+def list_template_categories():
+    """List all available legal document template categories and their counts."""
+    db = get_db_connection()
+    mod_file = DATA_DIR / "modele_documente.parquet"
+    if not mod_file.exists():
+        return {"categories": []}
+
+    results = db.execute(f"""
+        SELECT category, count(*) as count
+        FROM read_parquet('{mod_file}')
+        GROUP BY category
+        ORDER BY count DESC
+    """).pl().to_dicts()
+
+    return {"categories": results}
+
+
+@app.get("/api/v1/modele", tags=["Modele de Documente"])
+def list_document_templates(
+    category: str | None = Query(None, description="e.g. 'Contracte', 'Dreptul Familiei', 'Succesiuni & Testamente'"),
+    q: str | None = Query(None, description="Search term in title or content"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List and search legal document templates with category filtering."""
+    db = get_db_connection()
+    mod_file = DATA_DIR / "modele_documente.parquet"
+    if not mod_file.exists():
+        return {"count": 0, "page": page, "limit": limit, "data": []}
+
+    conditions = ["1=1"]
+    params = []
+
+    if category:
+        conditions.append("category ILIKE ?")
+        params.append(f"%{category}%")
+    if q:
+        conditions.append("(title ILIKE ? OR content ILIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%"])
+
+    where_clause = " AND ".join(conditions)
+    offset = (page - 1) * limit
+
+    query = f"""
+        SELECT id, slug, title, category, legal_basis, source_attribution, link, content
+        FROM read_parquet('{mod_file}')
+        WHERE {where_clause}
+        ORDER BY title ASC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+
+    results = db.execute(query, params).pl().to_dicts()
+    return {"count": len(results), "page": page, "limit": limit, "data": results}
+
+
+@app.get("/api/v1/modele/{template_id}", tags=["Modele de Documente"])
+def get_document_template(template_id: int):
+    """Retrieve full text, legal basis, fillable blanks, and source for a specific document template."""
+    db = get_db_connection()
+    mod_file = DATA_DIR / "modele_documente.parquet"
+    if not mod_file.exists():
+        raise HTTPException(status_code=404, detail="Templates dataset not loaded")
+
+    results = db.execute(f"SELECT * FROM read_parquet('{mod_file}') WHERE id = ?", [template_id]).pl().to_dicts()
+    if not results:
+        raise HTTPException(status_code=404, detail="Document template not found")
+
+    return results[0]

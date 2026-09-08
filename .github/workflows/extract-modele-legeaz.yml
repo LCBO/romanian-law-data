@@ -1,0 +1,54 @@
+name: Extract Legal Document Templates (legeaz.net)
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # Weekly on Sunday at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: 'Maximum catalog pages to crawl (1-18)'
+        required: false
+        default: '18'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  extract-modele:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Download existing template cache
+        run: |
+          mkdir -p data/cache
+          gh release download decisions-cache --pattern 'swept_modele_urls.parquet' --dir data/cache || echo "No previous template cache."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Legal Templates Extractor
+        run: |
+          uv run python -m etl.extract_modele --max-pages ${{ inputs.max_pages || 18 }}
+
+      - name: Update GitHub Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="decisions/$(date -u +%Y-%m-%d)"
+          # Upload or update modele_documente in the latest release
+          if [ -f "data/modele_documente.parquet" ]; then
+            gh release upload "$TAG" data/modele_documente.parquet --clobber || \
+            gh release upload latest data/modele_documente.parquet --clobber || echo "No release available to attach to yet."
+          fi

@@ -52,3 +52,19 @@ class RelationshipSchema(pa.DataFrameModel):
     class Config:
         strict = True
         coerce = True
+
+
+class DocumentTemplateSchema(pa.DataFrameModel):
+    id: int = pa.Field(unique=True)
+    slug: str = pa.Field(nullable=False)
+    title: str = pa.Field(nullable=False)
+    category: str = pa.Field(nullable=False)
+    legal_basis: str = pa.Field(nullable=True)
+    content: str = pa.Field(nullable=False)
+    source_attribution: str = pa.Field(nullable=True)
+    link: str = pa.Field(nullable=False)
+    synced_at: pl.Datetime = pa.Field(nullable=False)
+
+    class Config:
+        strict = True
+        coerce = True

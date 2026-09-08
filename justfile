@@ -14,6 +14,10 @@ extract:
 extract-dump path:
     uv run python -m etl.extract --dump-path {{path}}
 
+# Extract legal document templates from legeaz.net
+extract-modele pages="18":
+    uv run python -m etl.extract_modele --max-pages {{pages}}
+
 # Run ETL transform (cleans, parses citations, validates with Pandera, outputs parquet)
 transform:
     uv run python -m etl.transform

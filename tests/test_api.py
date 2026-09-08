@@ -13,13 +13,16 @@ client = TestClient(app)
 @pytest.fixture(scope="module", autouse=True)
 def setup_test_data():
     raw_dir = Path("data/raw")
+    data_dir = Path("data")
     raw_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
     
     sample_text = """
     Secţia I civilă a dispus sesizarea în temeiul art. 2 alin. (1) din Ordonanţa de urgenţă a Guvernului nr. 62/2024 
     privind salarizarea personalului plătit din fonduri publice şi art. 13 din anexa nr. V la Legea-cadru nr. 153/2017.
     """
     
+    # Decisions fixture
     df = pl.DataFrame([{
         "scj_id": "test-api-01",
         "title": "Decizia nr. 101/2026",
@@ -42,6 +45,20 @@ def setup_test_data():
     df.write_parquet(raw_dir / "test_api_raw.parquet")
     run_transform()
     
+    # Templates fixture
+    modele_df = pl.DataFrame([{
+        "id": 888123,
+        "slug": "model-contract-vanzare-imobil-optiune-rascumparare",
+        "title": "Model de contract de vânzare a unui imobil cu opţiune de răscumpărare",
+        "category": "Contracte",
+        "legal_basis": "art. 1758 Cod civil",
+        "content": "Subsemnatul vânzător vând cumpărătorului imobilul în condițiile art. 1758 Cod civil...",
+        "source_attribution": "Uniunea Naţionala a Notarilor Publici",
+        "link": "https://legeaz.net/modele/model-contract-vanzare-imobil-optiune-rascumparare",
+        "synced_at": datetime.now(),
+    }])
+    modele_df.write_parquet(data_dir / "modele_documente.parquet")
+
     yield
     
     # Cleanup test raw file
@@ -53,7 +70,8 @@ def test_health_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "healthy"
-    assert data["has_parquet"] is True
+    assert data["has_decisions"] is True
+    assert data["has_modele"] is True
 
 def test_stats_endpoint():
     resp = client.get("/api/v1/stats")
@@ -61,6 +79,7 @@ def test_stats_endpoint():
     data = resp.json()
     assert data["total_decisions"] >= 1
     assert data["total_paragraphs"] >= 1
+    assert data["total_modele"] >= 1
 
 def test_list_decisions():
     resp = client.get("/api/v1/decisions?department=Civil")
@@ -70,7 +89,6 @@ def test_list_decisions():
     assert data["data"][0]["decision_number"] == "Decizia nr. 101/2026"
 
 def test_decision_detail_and_citations():
-    # List to get ID
     resp = client.get("/api/v1/decisions")
     dec_id = resp.json()["data"][0]["id"]
     
@@ -79,14 +97,12 @@ def test_decision_detail_and_citations():
     detail_data = detail_resp.json()
     assert len(detail_data["citations"]) >= 1
     
-    # Decision -> Legislation
     cit_resp = client.get(f"/api/v1/decisions/{dec_id}/citations")
     assert cit_resp.status_code == 200
     citations = cit_resp.json()["citations"]
     assert any(c["act_type"] == "OUG" and "62" in c["act_number"] for c in citations)
 
 def test_legislation_to_decisions_search():
-    # Legislation -> Decision search
     resp = client.get("/api/v1/legislation/search?act_type=OUG&act_number=62&act_year=2024")
     assert resp.status_code == 200
     data = resp.json()
@@ -98,3 +114,25 @@ def test_fts_search():
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] >= 1
+
+def test_modele_endpoints():
+    # 1. Categories
+    cat_resp = client.get("/api/v1/modele/categories")
+    assert cat_resp.status_code == 200
+    cats = cat_resp.json()["categories"]
+    assert any(c["category"] == "Contracte" for c in cats)
+
+    # 2. List & Filter
+    list_resp = client.get("/api/v1/modele?category=Contracte")
+    assert list_resp.status_code == 200
+    list_data = list_resp.json()
+    assert list_data["count"] >= 1
+    assert "răscumpărare" in list_data["data"][0]["title"] or "rascumparare" in list_data["data"][0]["slug"]
+
+    # 3. Detail
+    tpl_id = list_data["data"][0]["id"]
+    det_resp = client.get(f"/api/v1/modele/{tpl_id}")
+    assert det_resp.status_code == 200
+    det_data = det_resp.json()
+    assert det_data["category"] == "Contracte"
+    assert "art. 1758" in det_data["legal_basis"]
