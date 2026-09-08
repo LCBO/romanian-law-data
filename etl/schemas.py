@@ -82,3 +82,24 @@ class DictionaryTermSchema(pa.DataFrameModel):
     class Config:
         strict = True
         coerce = True
+
+
+class CCRDecisionSchema(pa.DataFrameModel):
+    id: int = pa.Field(unique=True)
+    slug: str = pa.Field(nullable=False)
+    title: str = pa.Field(nullable=False)
+    act_type: str = pa.Field(nullable=False)
+    act_number: str = pa.Field(nullable=False)
+    act_year: int = pa.Field(nullable=True)
+    decision_date: pl.Date = pa.Field(nullable=True)
+    category: str = pa.Field(nullable=False)
+    publication_notice: str = pa.Field(nullable=True)
+    summary: str = pa.Field(nullable=True)
+    content: str = pa.Field(nullable=False)
+    pdf_url: str = pa.Field(nullable=False)
+    synced_at: pl.Datetime = pa.Field(nullable=False)
+
+    class Config:
+        strict = True
+        coerce = True
+

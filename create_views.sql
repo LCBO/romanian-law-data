@@ -138,6 +138,23 @@ SELECT * FROM modele_documente
 WHERE category = 'Succesiuni & Testamente';
 
 -- Modele Dreptul Familiei (Convenții matrimoniale, divorț, tutelă)
-CREATE OR REPLACE VIEW modele_familie AS
+CREATE OR REPLACE VIEW modele_familie AS 
 SELECT * FROM modele_documente
 WHERE category = 'Dreptul Familiei';
+
+-- =============================================================================
+-- Curtea Constituțională a României (CCR Jurisprudence Views)
+-- =============================================================================
+
+CREATE OR REPLACE VIEW ccr_decisions AS 
+SELECT * FROM read_parquet('data/ccr_decisions.parquet');
+
+-- Decizii de Admitere CCR (Neconstituționalitate admisă)
+CREATE OR REPLACE VIEW decizii_admitere_ccr AS 
+SELECT * FROM ccr_decisions
+WHERE category = 'Decizii de admitere' OR summary ILIKE '%admite%' OR title ILIKE '%admitere%';
+
+-- Hotărâri CCR (Validare alegeri, interimat președinte, etc.)
+CREATE OR REPLACE VIEW hotarari_ccr AS 
+SELECT * FROM ccr_decisions
+WHERE act_type = 'HOTĂRÂRE';

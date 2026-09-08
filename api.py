@@ -9,6 +9,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from etl.citations import extract_citations
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,7 @@ class HealthResponse(BaseModel):
     has_decisions: bool
     has_modele: bool
     has_dictionar: bool
+    has_ccr: bool
 
 
 class StatsResponse(BaseModel):
@@ -83,6 +87,7 @@ class StatsResponse(BaseModel):
     total_citations: int
     total_modele: int
     total_dictionar_terms: int
+    total_ccr_decisions: int
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -93,6 +98,7 @@ def health_check():
         "has_decisions": (DATA_DIR / "decisions.parquet").exists(),
         "has_modele": (DATA_DIR / "modele_documente.parquet").exists(),
         "has_dictionar": (DATA_DIR / "dictionar_juridic.parquet").exists(),
+        "has_ccr": (DATA_DIR / "ccr_decisions.parquet").exists(),
     }
 
 
@@ -104,12 +110,14 @@ def get_stats():
     rel_file = DATA_DIR / "relationships.parquet"
     mod_file = DATA_DIR / "modele_documente.parquet"
     dict_file = DATA_DIR / "dictionar_juridic.parquet"
+    ccr_file = DATA_DIR / "ccr_decisions.parquet"
 
     dec_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dec_file}')").fetchone()[0] if dec_file.exists() else 0
     para_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{para_file}')").fetchone()[0] if para_file.exists() else 0
     rel_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{rel_file}')").fetchone()[0] if rel_file.exists() else 0
     mod_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{mod_file}')").fetchone()[0] if mod_file.exists() else 0
     dict_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dict_file}')").fetchone()[0] if dict_file.exists() else 0
+    ccr_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{ccr_file}')").fetchone()[0] if ccr_file.exists() else 0
 
     return {
         "total_decisions": dec_cnt,
@@ -117,7 +125,9 @@ def get_stats():
         "total_citations": rel_cnt,
         "total_modele": mod_cnt,
         "total_dictionar_terms": dict_cnt,
+        "total_ccr_decisions": ccr_cnt,
     }
+
 
 
 # =============================================================================
@@ -537,3 +547,97 @@ def get_dictionary_term_detail(term_id_or_slug: str):
         raise HTTPException(status_code=404, detail="Dictionary term not found")
 
     return results[0]
+
+
+# =============================================================================
+# Curtea Constituțională a României (CCR) Endpoints
+# =============================================================================
+
+@app.get("/api/v1/ccr/categories", tags=["Curtea Constituțională (CCR)"])
+def list_ccr_categories():
+    """List all CCR decision categories and count of decisions per category."""
+    db = get_db_connection()
+    ccr_file = DATA_DIR / "ccr_decisions.parquet"
+    if not ccr_file.exists():
+        return {"categories": []}
+
+    results = db.execute(f"""
+        SELECT category, count(*) as count
+        FROM read_parquet('{ccr_file}')
+        GROUP BY category
+        ORDER BY count DESC
+    """).pl().to_dicts()
+
+    return {"categories": results}
+
+
+@app.get("/api/v1/ccr", tags=["Curtea Constituțională (CCR)"])
+def list_ccr_decisions(
+    category: str | None = Query(None, description="e.g. 'Decizii de admitere', 'Decizii relevante', 'Hotărâri de admitere'"),
+    act_type: str | None = Query(None, description="e.g. 'DECIZIE', 'HOTĂRÂRE', 'AVIZ CONSULTATIV'"),
+    year: int | None = Query(None, description="Filter by decision year (e.g. 2026, 2025)"),
+    q: str | None = Query(None, description="Search term in title, summary, or publication notice"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List and filter decisions, rulings, and advisory opinions from the Constitutional Court of Romania (CCR)."""
+    db = get_db_connection()
+    ccr_file = DATA_DIR / "ccr_decisions.parquet"
+    if not ccr_file.exists():
+        return {"count": 0, "page": page, "limit": limit, "data": []}
+
+    conditions = ["1=1"]
+    params = []
+
+    if category:
+        conditions.append("category ILIKE ?")
+        params.append(f"%{category}%")
+    if act_type:
+        conditions.append("act_type = ?")
+        params.append(act_type.upper())
+    if year:
+        conditions.append("act_year = ?")
+        params.append(year)
+    if q:
+        conditions.append("(title ILIKE ? OR summary ILIKE ? OR publication_notice ILIKE ? OR content ILIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
+
+    where_clause = " AND ".join(conditions)
+    offset = (page - 1) * limit
+
+    query = f"""
+        SELECT id, slug, title, act_type, act_number, act_year, decision_date, category, publication_notice, summary, pdf_url
+        FROM read_parquet('{ccr_file}')
+        WHERE {where_clause}
+        ORDER BY decision_date DESC NULLS LAST, id DESC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+
+    results = db.execute(query, params).pl().to_dicts()
+    return {"count": len(results), "page": page, "limit": limit, "data": results}
+
+
+@app.get("/api/v1/ccr/{decision_id_or_slug}", tags=["Curtea Constituțională (CCR)"])
+def get_ccr_decision_detail(decision_id_or_slug: str):
+    """Retrieve full text, PDF download link, metadata, and extracted citations for a CCR ruling."""
+    db = get_db_connection()
+    ccr_file = DATA_DIR / "ccr_decisions.parquet"
+    if not ccr_file.exists():
+        raise HTTPException(status_code=404, detail="CCR dataset not loaded")
+
+    if decision_id_or_slug.isdigit():
+        results = db.execute(f"SELECT * FROM read_parquet('{ccr_file}') WHERE id = ?", [int(decision_id_or_slug)]).pl().to_dicts()
+    else:
+        results = db.execute(f"SELECT * FROM read_parquet('{ccr_file}') WHERE slug = ?", [decision_id_or_slug]).pl().to_dicts()
+
+    if not results:
+        raise HTTPException(status_code=404, detail="CCR decision not found")
+
+    decision = results[0]
+    content = decision.get("content", "")
+    citations = extract_citations(decision["id"], content) if content else []
+    decision["citations"] = citations
+    return decision
+
+

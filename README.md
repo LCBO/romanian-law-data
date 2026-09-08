@@ -1,6 +1,6 @@
-# ⚖️ Romanian Legal Corpus & Intelligence API (*Instanțe & Legislație*)
+# ⚖️ Romanian Legal Corpus & Intelligence API (*Instanțe, CCR & Legislație*)
 
-High-performance, Zstandard-compressed Parquet datasets, DuckDB analytical engine, and FastAPI REST service for Romanian High Court judicial rulings (*Înalta Curte de Casație și Justiție* - ÎCCJ), bidirectional legislation citation graph, legal document templates (*Modele de Acte*), and legal dictionary definitions (*Dicționar Juridic*).
+High-performance, Zstandard-compressed Parquet datasets, DuckDB analytical engine, and FastAPI REST service for Romanian High Court judicial rulings (*Înalta Curte de Casație și Justiție* - ÎCCJ), Constitutional Court decisions (*Curtea Constituțională a României* - CCR), bidirectional legislation citation graph, legal document templates (*Modele de Acte*), and legal dictionary definitions (*Dicționar Juridic*).
 
 ---
 
@@ -15,6 +15,8 @@ All datasets are compressed with **Zstandard** (`zstd`) and structured for zero-
 | **`data/relationships.parquet`** | NLP Engine | Directed citation graph linking decisions to acts (*OUG*, *Lege*, *Codul Civil*, *Codul Penal*), articles, paragraphs, and CCR/ECHR rulings. |
 | **`data/modele_documente.parquet`** | `legeaz.net/modele` | ~900 categorized legal templates (Cereri, Contracte, Plângeri, Acțiuni, Notificări, etc.) with legal bases and fillable fields. |
 | **`data/dictionar_juridic.parquet`** | `legeaz.net/dictionar` | ~5,200 legal definitions indexed alphabetically (A–Z) with automated Romanian legislation citation extraction. |
+| **`data/ccr_decisions.parquet`** | `ccr.ro` | Constitutional Court rulings, unconstitutionality admissions, and opinions with full text decompressed from official PDFs. |
+
 
 ---
 
@@ -232,6 +234,74 @@ Retrieve the full legal definition, synonyms, and cited legislation for a specif
 
 ---
 
+### 7. ⚖️ Constitutional Court Decisions (*Curtea Constituțională a României - CCR*)
+
+#### `GET /api/v1/ccr/categories`
+List all CCR decision categories (Decizii de admitere, Decizii relevante, Hotărâri de admitere, etc.) and ruling counts.
+
+- **Response `200 OK`**:
+```json
+{
+  "categories": [
+    {"category": "Decizii de admitere", "count": 1210},
+    {"category": "Decizii relevante", "count": 456},
+    {"category": "Hotărâri de admitere", "count": 48},
+    {"category": "Hotărâri relevante", "count": 32},
+    {"category": "Avize consultative", "count": 12}
+  ]
+}
+```
+
+#### `GET /api/v1/ccr`
+Browse and filter Constitutional Court rulings across multiple years and categories.
+
+- **Query Parameters**:
+  - `category` *(string, optional)*: Filter by section (e.g. `Decizii de admitere`, `Hotărâri`).
+  - `act_type` *(string, optional)*: Filter by type (`DECIZIE`, `HOTĂRÂRE`, `AVIZ CONSULTATIV`).
+  - `year` *(int, optional)*: Filter by year of ruling (e.g. `2026`, `2025`, `2024`... down to `1992`).
+  - `q` *(string, optional)*: Keyword to search in ruling title, summary, or publication notice.
+  - `page` *(int, default: 1)*: Page number.
+  - `limit` *(int, default: 20, max: 100)*: Items per page.
+- **Example Request**:
+  ```http
+  GET /api/v1/ccr?year=2026&category=admitere&page=1&limit=10
+  ```
+
+#### `GET /api/v1/ccr/{decision_id_or_slug}`
+Retrieve complete ruling metadata, decompressed full judgment text extracted from official PDF, Monitorul Oficial publication notice, and cited Romanian legislation.
+
+- **Path Parameters**:
+  - `decision_id_or_slug` *(string, required)*: Numeric decision ID or slug (e.g. `decizie-885-2026`).
+- **Example Response**:
+```json
+{
+  "id": 885,
+  "slug": "decizie-885-2026-decizia-nr885-din-17-august-2026",
+  "title": "DECIZIA nr.885 din 17 august 2026",
+  "act_type": "DECIZIE",
+  "act_number": "885",
+  "act_year": 2026,
+  "decision_date": "2026-08-17",
+  "category": "Decizii de admitere",
+  "publication_notice": "Publicată în Monitorul Oficial nr.715 din 27.08.2026",
+  "summary": "referitoare la obiecția de neconstituționalitate a Legii...",
+  "pdf_url": "https://www.ccr.ro/wp-content/uploads/2026/08/Decizie_885_2026.pdf",
+  "content": "...",
+  "citations": [
+    {
+      "canonical_citation": "LEGE 47/1992 art. 2",
+      "target_type": "LAW",
+      "act_type": "LEGE",
+      "act_number": "47",
+      "act_year": 1992,
+      "article_number": "2"
+    }
+  ]
+}
+```
+
+---
+
 ## 🔎 Pre-Configured DuckDB SQL Views (`create_views.sql`)
 
 Load `create_views.sql` into any DuckDB session for out-of-the-box analytical queries:
@@ -248,6 +318,9 @@ IMPORT DATABASE 'data'; -- Or execute create_views.sql
 * `hp_decisions` — **Hotărâri Prealabile** (Preliminary rulings on legal questions)
 * `modele_documente` — Pre-filtered table view of legal templates
 * `dictionar_juridic` — Pre-filtered table view of legal dictionary definitions
+* `ccr_decisions` — Base view of all Constitutional Court decisions and rulings
+* `decizii_admitere_ccr` — CCR rulings upholding unconstitutionality objections/exceptions
+* `hotarari_ccr` — CCR official rulings (electoral validation, interim presidential status)
 
 ---
 
@@ -258,6 +331,7 @@ IMPORT DATABASE 'data'; -- Or execute create_views.sql
 | **Decisions & Citations** | **Daily at 04:30 AM** (`30 1 * * *` UTC) | `scj.ro` | `decisions.parquet`, `decision_paragraphs.parquet`, `relationships.parquet`, `fts.duckdb` |
 | **Document Templates** | **Weekly Sunday at 05:00 AM** (`00 2 * * 0` UTC) | `legeaz.net/modele` | `modele_documente.parquet` |
 | **Legal Dictionary** | **Weekly Saturday at 05:30 AM** (`30 2 * * 6` UTC) | `legeaz.net/dictionar` | `dictionar_juridic.parquet` |
+| **Constitutional Court (CCR)** | **Weekly Friday at 04:30 AM** (`30 1 * * 5` UTC) | `ccr.ro` | `ccr_decisions.parquet` |
 
 ---
 
@@ -273,6 +347,7 @@ uv run pytest -v
 # Run extractors manually
 just extract-modele
 just extract-dictionar
+just extract-ccr
 
 # Start API server
 just serve
@@ -282,4 +357,5 @@ just serve
 
 ## 📜 License & Attribution
 
-Public judicial case law from the Romanian High Court of Cassation and Justice (*Înalta Curte de Casație și Justiție*) and legal models/definitions from *legeaz.net*. Tooling, ETL pipeline, and API are open-source.
+Public judicial case law from the Romanian High Court of Cassation and Justice (*Înalta Curte de Casație și Justiție*), the Constitutional Court of Romania (*Curtea Constituțională a României*), and legal models/definitions from *legeaz.net*. Tooling, ETL pipeline, and API are open-source.
+

@@ -22,6 +22,11 @@ extract-modele pages="18":
 extract-dictionar pages="104":
     uv run python -m etl.extract_dictionar --max-pages {{pages}}
 
+# Extract Constitutional Court rulings (CCR) and decompress PDFs
+extract-ccr pages="":
+    uv run python -m etl.extract_ccr {{ if pages != "" { "--max-pages " + pages } else { "" } }}
+
+
 # Run ETL transform (cleans, parses citations, validates with Pandera, outputs parquet)
 transform:
     uv run python -m etl.transform

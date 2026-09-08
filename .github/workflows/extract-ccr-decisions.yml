@@ -1,0 +1,77 @@
+name: Extract Constitutional Court Decisions (CCR)
+
+on:
+  schedule:
+    - cron: '30 1 * * 5' # Weekly on Friday at 01:30 UTC (04:30 AM Romanian time)
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: 'Maximum catalog pages to crawl per section (leave empty for all)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  extract-ccr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Download existing CCR dataset for incremental cache
+        run: |
+          mkdir -p data
+          gh release download decisions-cache --pattern 'ccr_decisions.parquet' --dir data || echo "No previous CCR cache."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run CCR Extractor & PDF Parser
+        run: |
+          if [ -n "${{ inputs.max_pages }}" ]; then
+            uv run python -m etl.extract_ccr --max-pages "${{ inputs.max_pages }}"
+          else
+            uv run python -m etl.extract_ccr
+          fi
+
+      - name: Upload Parquet Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccr-parquet
+          path: data/ccr_decisions.parquet
+          if-no-files-found: warn
+
+      - name: Update GitHub Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="decisions/$(date -u +%Y-%m-%d)"
+          if [ -f "data/ccr_decisions.parquet" ]; then
+            gh release upload "$TAG" data/ccr_decisions.parquet --clobber || \
+            gh release upload latest data/ccr_decisions.parquet --clobber || echo "No release available to attach to yet."
+          fi
+
+      - name: Sync to Cloudflare R2 (Optional)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          if [ -n "$R2_ACCOUNT_ID" ] && [ -n "$R2_ACCESS_KEY_ID" ] && [ -f "data/ccr_decisions.parquet" ]; then
+            uv run python -m etl.r2_sync
+          else
+            echo "R2 credentials not configured or dataset missing, skipping R2 sync."
+          fi

@@ -71,6 +71,24 @@ def setup_test_data():
     }])
     dict_df.write_parquet(data_dir / "dictionar_juridic.parquet")
 
+    # CCR fixture
+    ccr_df = pl.DataFrame([{
+        "id": 991,
+        "slug": "decizie-885-2026-decizia-nr885-din-17-august-2026",
+        "title": "DECIZIA nr.885 din 17 august 2026",
+        "act_type": "DECIZIE",
+        "act_number": "885",
+        "act_year": 2026,
+        "decision_date": date(2026, 8, 17),
+        "category": "Decizii de admitere",
+        "publication_notice": "Publicată în Monitorul Oficial nr.715 din 27.08.2026",
+        "summary": "referitoare la obiecția de neconstituționalitate...",
+        "content": "Curtea Constituțională a constatat neconstituționalitatea conform art. 2 din Legea nr. 47/1992 privind organizarea și funcționarea Curții Constituționale.",
+        "pdf_url": "https://www.ccr.ro/wp-content/uploads/2026/08/Decizie_885_2026.pdf",
+        "synced_at": datetime.now(),
+    }])
+    ccr_df.write_parquet(data_dir / "ccr_decisions.parquet")
+
     yield
     
     # Cleanup test raw file
@@ -85,6 +103,7 @@ def test_health_endpoint():
     assert data["has_decisions"] is True
     assert data["has_modele"] is True
     assert data["has_dictionar"] is True
+    assert data["has_ccr"] is True
 
 def test_stats_endpoint():
     resp = client.get("/api/v1/stats")
@@ -94,6 +113,7 @@ def test_stats_endpoint():
     assert data["total_paragraphs"] >= 1
     assert data["total_modele"] >= 1
     assert data["total_dictionar_terms"] >= 1
+    assert data["total_ccr_decisions"] >= 1
 
 def test_list_decisions():
     resp = client.get("/api/v1/decisions?department=Civil")
@@ -165,3 +185,27 @@ def test_dictionar_endpoints():
     assert det_resp.status_code == 200
     det_data = det_resp.json()
     assert "funcţionarului public" in det_data["definition"]
+
+def test_ccr_endpoints():
+    # 1. Categories
+    cat_resp = client.get("/api/v1/ccr/categories")
+    assert cat_resp.status_code == 200
+    cats = cat_resp.json()["categories"]
+    assert any(c["category"] == "Decizii de admitere" for c in cats)
+
+    # 2. List & Search
+    list_resp = client.get("/api/v1/ccr?year=2026&category=admitere")
+    assert list_resp.status_code == 200
+    list_data = list_resp.json()
+    assert list_data["count"] >= 1
+    assert list_data["data"][0]["act_number"] == "885"
+
+    # 3. Detail by ID or Slug
+    slug = list_data["data"][0]["slug"]
+    det_resp = client.get(f"/api/v1/ccr/{slug}")
+    assert det_resp.status_code == 200
+    det_data = det_resp.json()
+    assert det_data["act_number"] == "885"
+    assert len(det_data["citations"]) >= 1
+    assert any(c["act_number"] == "47" and c["act_year"] == 1992 for c in det_data["citations"])
+
