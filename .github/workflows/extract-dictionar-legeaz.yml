@@ -42,12 +42,37 @@ jobs:
         run: |
           uv run python -m etl.extract_dictionar --max-pages ${{ inputs.max_pages || 104 }}
 
-      - name: Update GitHub Release Asset
+      - name: Upload Dictionary Parquet Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dictionar-juridic-parquet
+          path: data/dictionar_juridic.parquet
+          if-no-files-found: warn
+
+      - name: Publish or Update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="decisions/$(date -u +%Y-%m-%d)"
           if [ -f "data/dictionar_juridic.parquet" ]; then
-            gh release upload "$TAG" data/dictionar_juridic.parquet --clobber || \
-            gh release upload latest data/dictionar_juridic.parquet --clobber || echo "No release available to attach to yet."
+            # Ensure dated release exists
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              gh release create "$TAG" --title "Romanian Legal Corpus $TAG" --notes "Automated release of Romanian legal datasets." || true
+            fi
+            gh release upload "$TAG" data/dictionar_juridic.parquet --clobber || true
+
+            # Ensure latest release exists
+            if ! gh release view latest >/dev/null 2>&1; then
+              gh release create latest --title "Romanian Legal Corpus (Latest)" --notes "Latest build of all Romanian legal datasets." || true
+            fi
+            gh release upload latest data/dictionar_juridic.parquet --clobber || true
           fi
+
+          # Update cache release
+          if [ -f "data/cache/swept_dictionar_urls.parquet" ]; then
+            if ! gh release view decisions-cache >/dev/null 2>&1; then
+              gh release create decisions-cache --title "Pipeline Checkpoint Cache" --notes "Internal cache artifacts." || true
+            fi
+            gh release upload decisions-cache data/cache/swept_dictionar_urls.parquet --clobber || true
+          fi
+

@@ -42,13 +42,37 @@ jobs:
         run: |
           uv run python -m etl.extract_modele --max-pages ${{ inputs.max_pages || 18 }}
 
-      - name: Update GitHub Release Asset
+      - name: Upload Modele Parquet Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: modele-documente-parquet
+          path: data/modele_documente.parquet
+          if-no-files-found: warn
+
+      - name: Publish or Update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="decisions/$(date -u +%Y-%m-%d)"
-          # Upload or update modele_documente in the latest release
           if [ -f "data/modele_documente.parquet" ]; then
-            gh release upload "$TAG" data/modele_documente.parquet --clobber || \
-            gh release upload latest data/modele_documente.parquet --clobber || echo "No release available to attach to yet."
+            # Ensure dated release exists
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              gh release create "$TAG" --title "Romanian Legal Corpus $TAG" --notes "Automated release of Romanian legal datasets." || true
+            fi
+            gh release upload "$TAG" data/modele_documente.parquet --clobber || true
+
+            # Ensure latest release exists
+            if ! gh release view latest >/dev/null 2>&1; then
+              gh release create latest --title "Romanian Legal Corpus (Latest)" --notes "Latest build of all Romanian legal datasets." || true
+            fi
+            gh release upload latest data/modele_documente.parquet --clobber || true
           fi
+
+          # Update cache release
+          if [ -f "data/cache/swept_modele_urls.parquet" ]; then
+            if ! gh release view decisions-cache >/dev/null 2>&1; then
+              gh release create decisions-cache --title "Pipeline Checkpoint Cache" --notes "Internal cache artifacts." || true
+            fi
+            gh release upload decisions-cache data/cache/swept_modele_urls.parquet --clobber || true
+          fi
+

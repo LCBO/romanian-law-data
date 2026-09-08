@@ -53,15 +53,25 @@ jobs:
           path: data/ccr_decisions.parquet
           if-no-files-found: warn
 
-      - name: Update GitHub Release Asset
+      - name: Publish or Update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="decisions/$(date -u +%Y-%m-%d)"
           if [ -f "data/ccr_decisions.parquet" ]; then
-            gh release upload "$TAG" data/ccr_decisions.parquet --clobber || \
-            gh release upload latest data/ccr_decisions.parquet --clobber || echo "No release available to attach to yet."
+            # Ensure dated release exists
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              gh release create "$TAG" --title "Romanian Legal Corpus $TAG" --notes "Automated release of Romanian legal datasets." || true
+            fi
+            gh release upload "$TAG" data/ccr_decisions.parquet --clobber || true
+
+            # Ensure latest release exists
+            if ! gh release view latest >/dev/null 2>&1; then
+              gh release create latest --title "Romanian Legal Corpus (Latest)" --notes "Latest build of all Romanian legal datasets." || true
+            fi
+            gh release upload latest data/ccr_decisions.parquet --clobber || true
           fi
+
 
       - name: Sync to Cloudflare R2 (Optional)
         env:
