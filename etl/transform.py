@@ -72,7 +72,7 @@ def run_transform():
             "summary": meta.get("Sumar speță") or meta.get("Rezumat") or "",
             "content": content,
             "link": row.get("link"),
-            "synced_at": datetime.utcnow(),
+            "synced_at": datetime.now(),
         }
         decisions_list.append(decision_rec)
 
