@@ -178,6 +178,7 @@ def list_decisions(
     where_clause = " AND ".join(conditions)
     offset = (page - 1) * limit
 
+    count_params = list(params)
     query = f"""
         SELECT 
             id, scj_id, decision_number, decision_date, docket_number,
@@ -191,7 +192,8 @@ def list_decisions(
     params.extend([limit, offset])
 
     results = db.execute(query, params).pl().to_dicts()
-    return {"count": len(results), "page": page, "limit": limit, "data": results}
+    total = db.execute(f"SELECT count(*) FROM read_parquet('{dec_file}') WHERE {where_clause}", count_params).fetchone()[0]
+    return {"total": total, "count": len(results), "page": page, "limit": limit, "data": results}
 
 
 @app.get("/api/v1/decisions/{decision_id}", tags=["Decisions"])
@@ -447,6 +449,7 @@ def list_document_templates(
     where_clause = " AND ".join(conditions)
     offset = (page - 1) * limit
 
+    count_params = list(params)
     query = f"""
         SELECT id, slug, title, category, legal_basis, source_attribution, link, content
         FROM read_parquet('{mod_file}')
@@ -457,7 +460,8 @@ def list_document_templates(
     params.extend([limit, offset])
 
     results = db.execute(query, params).pl().to_dicts()
-    return {"count": len(results), "page": page, "limit": limit, "data": results}
+    total = db.execute(f"SELECT count(*) FROM read_parquet('{mod_file}') WHERE {where_clause}", count_params).fetchone()[0]
+    return {"total": total, "count": len(results), "page": page, "limit": limit, "data": results}
 
 
 @app.get("/api/v1/modele/{template_id}", tags=["Modele de Documente"])
@@ -523,6 +527,7 @@ def list_dictionary_terms(
     where_clause = " AND ".join(conditions)
     offset = (page - 1) * limit
 
+    count_params = list(params)
     query = f"""
         SELECT id, slug, term, letter, definition, link
         FROM read_parquet('{dict_file}')
@@ -533,7 +538,8 @@ def list_dictionary_terms(
     params.extend([limit, offset])
 
     results = db.execute(query, params).pl().to_dicts()
-    return {"count": len(results), "page": page, "limit": limit, "data": results}
+    total = db.execute(f"SELECT count(*) FROM read_parquet('{dict_file}') WHERE {where_clause}", count_params).fetchone()[0]
+    return {"total": total, "count": len(results), "page": page, "limit": limit, "data": results}
 
 
 @app.get("/api/v1/dictionar/{term_id_or_slug}", tags=["Dicționar Juridic"])
@@ -611,6 +617,7 @@ def list_ccr_decisions(
     where_clause = " AND ".join(conditions)
     offset = (page - 1) * limit
 
+    count_params = list(params)
     query = f"""
         SELECT id, slug, title, act_type, act_number, act_year, decision_date, category, publication_notice, summary, pdf_url
         FROM read_parquet('{ccr_file}')
@@ -621,7 +628,8 @@ def list_ccr_decisions(
     params.extend([limit, offset])
 
     results = db.execute(query, params).pl().to_dicts()
-    return {"count": len(results), "page": page, "limit": limit, "data": results}
+    total = db.execute(f"SELECT count(*) FROM read_parquet('{ccr_file}') WHERE {where_clause}", count_params).fetchone()[0]
+    return {"total": total, "count": len(results), "page": page, "limit": limit, "data": results}
 
 
 @app.get("/api/v1/ccr/{decision_id_or_slug}", tags=["Curtea Constituțională (CCR)"])
@@ -689,6 +697,7 @@ def list_legislation_documents(
     where_clause = " AND ".join(conditions)
     offset = (page - 1) * limit
 
+    count_params = list(params)
     query = f"""
         SELECT id, type, document_number, document_citation, issuer, title, adopted_at, published_at, effective_at, gazette_number, status, link
         FROM read_parquet('{doc_file}')
@@ -699,7 +708,8 @@ def list_legislation_documents(
     params.extend([limit, offset])
 
     results = db.execute(query, params).pl().to_dicts()
-    return {"count": len(results), "page": page, "limit": limit, "data": results}
+    total = db.execute(f"SELECT count(*) FROM read_parquet('{doc_file}') WHERE {where_clause}", count_params).fetchone()[0]
+    return {"total": total, "count": len(results), "page": page, "limit": limit, "data": results}
 
 
 @app.get("/api/v1/documents/{document_id}", tags=["Legislație Primară"])
