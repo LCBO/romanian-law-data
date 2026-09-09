@@ -40,7 +40,7 @@ def build_fts():
             'id', 
             'content', 
             stemmer='romanian', 
-            stopwords='romanian', 
+            stopwords='none', 
             strip_accents=1, 
             lower=1
         );
