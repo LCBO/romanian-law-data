@@ -21,11 +21,12 @@ All datasets are compressed with **Zstandard** (`zstd`) and structured for zero-
 
 ---
 
-## ☁️ Cloudflare R2 Object Storage (`s3://lawchat-documents`)
+## ☁️ Cloudflare R2 Object Storage (`s3://lawchat-documents/legislatie/`)
 
-All datasets and database snapshots are automatically uploaded and synchronized to **Cloudflare R2**:
+All datasets and database snapshots are automatically uploaded and synchronized to **Cloudflare R2** under the **`legislatie/`** folder:
 
 - **R2 Bucket**: `lawchat-documents`
+- **Prefix / Subfolder**: `legislatie`
 - **S3 Endpoint**: `https://<account-id>.r2.cloudflarestorage.com`
 
 ### Environment Configuration (`.env`)
@@ -34,6 +35,7 @@ R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 R2_ACCESS_KEY_ID=<your_r2_access_key_id>
 R2_SECRET_ACCESS_KEY=<your_r2_secret_access_key>
 R2_BUCKET=lawchat-documents
+R2_PREFIX=legislatie
 ```
 
 ### Direct Streaming from DuckDB via S3/R2
@@ -48,7 +50,7 @@ SET s3_url_style = 'path';
 
 -- Query remote Parquet without downloading the whole file:
 SELECT title, document_citation, adopted_at 
-FROM read_parquet('s3://lawchat-documents/documents.parquet')
+FROM read_parquet('s3://lawchat-documents/legislatie/documents.parquet')
 WHERE issuer = 'CURTEA CONSTITUȚIONALĂ'
 LIMIT 10;
 ```
