@@ -43,6 +43,7 @@ def get_r2_client():
 
 def sync_to_r2(bucket_name: str | None = None, prefix: str = "", files: list[str] | None = None):
     bucket = bucket_name or os.getenv("R2_BUCKET") or os.getenv("R2_BUCKET_NAME") or "lawchat-documents"
+    prefix = prefix if prefix != "" else os.getenv("R2_PREFIX", "")
 
     try:
         client = get_r2_client()
