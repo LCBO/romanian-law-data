@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 import boto3
 from botocore.config import Config
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
