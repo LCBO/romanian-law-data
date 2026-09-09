@@ -209,3 +209,21 @@ def test_ccr_endpoints():
     assert len(det_data["citations"]) >= 1
     assert any(c["act_number"] == "47" and c["act_year"] == 1992 for c in det_data["citations"])
 
+
+def test_documents_endpoints():
+    resp = client.get("/api/v1/documents?limit=5")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "count" in data
+    assert "data" in data
+    if data["count"] > 0:
+        doc_id = data["data"][0]["id"]
+        detail_resp = client.get(f"/api/v1/documents/{doc_id}")
+        assert detail_resp.status_code == 200
+        assert "title" in detail_resp.json()
+
+        art_resp = client.get(f"/api/v1/documents/{doc_id}/articles")
+        assert art_resp.status_code == 200
+        assert "articles" in art_resp.json()
+
+

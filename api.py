@@ -79,6 +79,7 @@ class HealthResponse(BaseModel):
     has_modele: bool
     has_dictionar: bool
     has_ccr: bool
+    has_documents: bool
 
 
 class StatsResponse(BaseModel):
@@ -88,6 +89,7 @@ class StatsResponse(BaseModel):
     total_modele: int
     total_dictionar_terms: int
     total_ccr_decisions: int
+    total_documents: int
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -99,6 +101,7 @@ def health_check():
         "has_modele": (DATA_DIR / "modele_documente.parquet").exists(),
         "has_dictionar": (DATA_DIR / "dictionar_juridic.parquet").exists(),
         "has_ccr": (DATA_DIR / "ccr_decisions.parquet").exists(),
+        "has_documents": (DATA_DIR / "documents.parquet").exists(),
     }
 
 
@@ -111,6 +114,7 @@ def get_stats():
     mod_file = DATA_DIR / "modele_documente.parquet"
     dict_file = DATA_DIR / "dictionar_juridic.parquet"
     ccr_file = DATA_DIR / "ccr_decisions.parquet"
+    doc_file = DATA_DIR / "documents.parquet"
 
     dec_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dec_file}')").fetchone()[0] if dec_file.exists() else 0
     para_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{para_file}')").fetchone()[0] if para_file.exists() else 0
@@ -118,6 +122,7 @@ def get_stats():
     mod_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{mod_file}')").fetchone()[0] if mod_file.exists() else 0
     dict_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dict_file}')").fetchone()[0] if dict_file.exists() else 0
     ccr_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{ccr_file}')").fetchone()[0] if ccr_file.exists() else 0
+    doc_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{doc_file}')").fetchone()[0] if doc_file.exists() else 0
 
     return {
         "total_decisions": dec_cnt,
@@ -126,6 +131,7 @@ def get_stats():
         "total_modele": mod_cnt,
         "total_dictionar_terms": dict_cnt,
         "total_ccr_decisions": ccr_cnt,
+        "total_documents": doc_cnt,
     }
 
 
@@ -639,5 +645,94 @@ def get_ccr_decision_detail(decision_id_or_slug: str):
     citations = extract_citations(decision["id"], content) if content else []
     decision["citations"] = citations
     return decision
+
+
+# =============================================================================
+# Primary Legislation Endpoints (Corpus Legislativ: Legi, OUG, HG, Decrete)
+# =============================================================================
+
+@app.get("/api/v1/documents", tags=["Legislație Primară"])
+def list_legislation_documents(
+    type: str | None = Query(None, description="e.g. 'LEGE', 'ORDONANȚĂ DE URGENȚĂ', 'HOTĂRÂRE', 'DECIZIE'"),
+    issuer: str | None = Query(None, description="e.g. 'PARLAMENTUL', 'GUVERNUL', 'CURTEA CONSTITUȚIONALĂ'"),
+    document_number: str | None = Query(None, description="e.g. '62', '287', '562'"),
+    year: int | None = Query(None, description="Year adopted (e.g. 2024, 2025)"),
+    q: str | None = Query(None, description="Search keyword in title or content"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List and filter primary Romanian legislation from documents.parquet (over 251,000 acts)."""
+    db = get_db_connection()
+    doc_file = DATA_DIR / "documents.parquet"
+    if not doc_file.exists():
+        return {"count": 0, "page": page, "limit": limit, "data": []}
+
+    conditions = ["1=1"]
+    params = []
+
+    if type:
+        conditions.append("type ILIKE ?")
+        params.append(f"%{type}%")
+    if issuer:
+        conditions.append("issuer ILIKE ?")
+        params.append(f"%{issuer}%")
+    if document_number:
+        conditions.append("document_number = ?")
+        params.append(str(document_number))
+    if year:
+        conditions.append("EXTRACT(year FROM adopted_at) = ?")
+        params.append(year)
+    if q:
+        conditions.append("(title ILIKE ? OR content ILIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%"])
+
+    where_clause = " AND ".join(conditions)
+    offset = (page - 1) * limit
+
+    query = f"""
+        SELECT id, type, document_number, document_citation, issuer, title, adopted_at, published_at, effective_at, gazette_number, status, link
+        FROM read_parquet('{doc_file}')
+        WHERE {where_clause}
+        ORDER BY adopted_at DESC NULLS LAST, id DESC
+        LIMIT ? OFFSET ?
+    """
+    params.extend([limit, offset])
+
+    results = db.execute(query, params).pl().to_dicts()
+    return {"count": len(results), "page": page, "limit": limit, "data": results}
+
+
+@app.get("/api/v1/documents/{document_id}", tags=["Legislație Primară"])
+def get_legislation_document(document_id: int):
+    """Retrieve full text and metadata for a specific primary legislative act."""
+    db = get_db_connection()
+    doc_file = DATA_DIR / "documents.parquet"
+    if not doc_file.exists():
+        raise HTTPException(status_code=404, detail="Legislation dataset not loaded")
+
+    results = db.execute(f"SELECT * FROM read_parquet('{doc_file}') WHERE id = ?", [document_id]).pl().to_dicts()
+    if not results:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return results[0]
+
+
+@app.get("/api/v1/documents/{document_id}/articles", tags=["Legislație Primară"])
+def get_document_articles(document_id: int):
+    """Retrieve all structured articles for a specific legislative act."""
+    db = get_db_connection()
+    art_file = DATA_DIR / "articles.parquet"
+    if not art_file.exists():
+        raise HTTPException(status_code=404, detail="Articles dataset not loaded")
+
+    results = db.execute(f"""
+        SELECT id, article_number, article_variant, article_citation, content
+        FROM read_parquet('{art_file}')
+        WHERE document_id = ?
+        ORDER BY id ASC
+    """, [document_id]).pl().to_dicts()
+
+    return {"document_id": document_id, "count": len(results), "articles": results}
+
 
 
