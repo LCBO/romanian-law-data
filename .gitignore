@@ -39,4 +39,9 @@ data/
 .vscode/
 *.swp
 *.swo
-.DS_Store
+*.DS_Store
+
+# Environment and logs
+.env
+.env.*
+logs/

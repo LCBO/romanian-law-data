@@ -10,45 +10,76 @@ FTS_DB_PATH = DATA_DIR / "fts.duckdb"
 
 
 def build_fts():
+    articles_parquet = DATA_DIR / "articles.parquet"
     decisions_parquet = DATA_DIR / "decisions.parquet"
-    if not decisions_parquet.exists():
-        logger.error(f"{decisions_parquet} does not exist. Run transform first.")
+
+    if not articles_parquet.exists() and not decisions_parquet.exists():
+        logger.error("Neither articles.parquet nor decisions.parquet found to build FTS index.")
         return
 
-    if FTS_DB_PATH.exists():
-        FTS_DB_PATH.unlink()
+    temp_db_path = DATA_DIR / "fts.duckdb.tmp"
+    if temp_db_path.exists():
+        temp_db_path.unlink()
 
-    logger.info("Connecting to DuckDB and building FTS index...")
-    conn = duckdb.connect(str(FTS_DB_PATH))
-    
-    # Install and load Full Text Search extension
+    logger.info(f"Connecting to DuckDB ({temp_db_path}) and building FTS index...")
+    conn = duckdb.connect(str(temp_db_path))
     conn.execute("INSTALL fts; LOAD fts;")
 
-    # Create FTS source table
-    conn.execute("""
-        CREATE TABLE decisions_fts AS 
-        SELECT id, content 
-        FROM read_parquet('data/decisions.parquet')
-        WHERE content IS NOT NULL AND trim(content) != '';
-    """)
+    # 1. Articles FTS Index
+    if articles_parquet.exists():
+        logger.info("Creating articles_fts source table...")
+        conn.execute(f"""
+            CREATE TABLE articles_fts AS 
+            SELECT id, content 
+            FROM read_parquet('{articles_parquet}')
+            WHERE content IS NOT NULL AND trim(content) != '';
+        """)
+        logger.info("Building BM25 index on articles_fts.content...")
+        conn.execute("""
+            PRAGMA create_fts_index(
+                'articles_fts', 
+                'id', 
+                'content', 
+                stemmer='romanian', 
+                stopwords='none', 
+                strip_accents=1, 
+                lower=1
+            );
+        """)
+        row_count = conn.execute("SELECT count(*) FROM articles_fts").fetchone()[0]
+        logger.info(f"Built articles_fts index for {row_count} articles.")
 
-    # Create BM25 Index
-    logger.info("Creating BM25 index on decisions_fts.content...")
-    conn.execute("""
-        PRAGMA create_fts_index(
-            'decisions_fts', 
-            'id', 
-            'content', 
-            stemmer='romanian', 
-            stopwords='none', 
-            strip_accents=1, 
-            lower=1
-        );
-    """)
+    # 2. Decisions FTS Index
+    if decisions_parquet.exists():
+        logger.info("Creating decisions_fts source table...")
+        conn.execute(f"""
+            CREATE TABLE decisions_fts AS 
+            SELECT id, content 
+            FROM read_parquet('{decisions_parquet}')
+            WHERE content IS NOT NULL AND trim(content) != '';
+        """)
+        logger.info("Building BM25 index on decisions_fts.content...")
+        conn.execute("""
+            PRAGMA create_fts_index(
+                'decisions_fts', 
+                'id', 
+                'content', 
+                stemmer='romanian', 
+                stopwords='none', 
+                strip_accents=1, 
+                lower=1
+            );
+        """)
+        row_count = conn.execute("SELECT count(*) FROM decisions_fts").fetchone()[0]
+        logger.info(f"Built decisions_fts index for {row_count} decisions.")
 
-    row_count = conn.execute("SELECT count(*) FROM decisions_fts").fetchone()[0]
-    logger.info(f"FTS index built successfully for {row_count} decisions at {FTS_DB_PATH}!")
     conn.close()
+
+    # Atomic swap
+    if FTS_DB_PATH.exists():
+        FTS_DB_PATH.unlink()
+    temp_db_path.rename(FTS_DB_PATH)
+    logger.info(f"DuckDB FTS database successfully written to {FTS_DB_PATH} ({FTS_DB_PATH.stat().st_size / (1024*1024):.2f} MB)")
 
 
 if __name__ == "__main__":

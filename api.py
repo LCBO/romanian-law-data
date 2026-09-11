@@ -1,34 +1,145 @@
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import duckdb
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from etl.citations import extract_citations
 
+# Load environment variables
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+# Storage configuration
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 FTS_DB_PATH = DATA_DIR / "fts.duckdb"
 VIEWS_SQL_PATH = Path(os.getenv("VIEWS_SQL_PATH", "create_views.sql"))
 
-conn: duckdb.DuckDBPyConnection | None = None
+# Cloudflare R2 / S3 Configuration
+R2_ENDPOINT = os.getenv("R2_ENDPOINT", "https://f85d069965caebe0bd1d0ae16e3e8afc.r2.cloudflarestorage.com")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "f0fb17605c1a39679b10933b1639756e")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "7761a3c7d440baff2ebf17fab4b3f80b450012b28e3866519eee3abc48460ef6")
+R2_BUCKET = os.getenv("R2_BUCKET", "lawchat-documents")
+R2_PREFIX = os.getenv("R2_PREFIX", "legislatie").strip("/")
+FILE_STORAGE_PROVIDER = os.getenv("FILE_STORAGE_PROVIDER", "r2").lower()
+USE_R2 = FILE_STORAGE_PROVIDER in ("r2", "s3", "cloudflare", "cloudflare_r2")
+
+TABLE_NAMES = [
+    "documents",
+    "articles",
+    "paragraphs",
+    "decisions",
+    "decision_paragraphs",
+    "relationships",
+    "ccr_decisions",
+    "modele_documente",
+    "dictionar_juridic",
+]
 
 
-def get_db_connection() -> duckdb.DuckDBPyConnection:
-    global conn
-    if conn is None:
-        logger.info("Initializing DuckDB connection...")
+class SafeResult:
+    def __init__(self, pl_data, rows):
+        self._pl_data = pl_data
+        self._rows = rows
+
+    def pl(self):
+        class PlWrapper:
+            def __init__(self, data):
+                self.data = data
+            def to_dicts(self):
+                return self.data
+        return PlWrapper(self._pl_data)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else (0,)
+
+    def fetchall(self):
+        return self._rows
+
+
+class ThreadSafeDuckDB:
+    _lock = threading.Lock()
+
+    def __init__(self, conn: duckdb.DuckDBPyConnection):
+        self._conn = conn
+
+    def execute(self, query: str, parameters: Any = None) -> SafeResult:
+        with self._lock:
+            if parameters is not None:
+                cur = self._conn.execute(query, parameters)
+            else:
+                cur = self._conn.execute(query)
+            
+            try:
+                pl_data = cur.pl().to_dicts()
+                rows = [tuple(d.values()) for d in pl_data]
+            except Exception:
+                rows = cur.fetchall()
+                pl_data = []
+            
+            return SafeResult(pl_data, rows)
+
+
+_root_conn: duckdb.DuckDBPyConnection | None = None
+_thread_safe_db: ThreadSafeDuckDB | None = None
+_conn_lock = threading.Lock()
+
+
+def _init_root_connection() -> ThreadSafeDuckDB:
+    global _root_conn, _thread_safe_db
+    with _conn_lock:
+        if _thread_safe_db is not None:
+            return _thread_safe_db
+        logger.info("Initializing DuckDB connection (Storage: %s)...", "Cloudflare R2 Native" if USE_R2 else "Local Disk")
         conn = duckdb.connect(":memory:")
 
-        # Attach FTS database if it exists
+        if USE_R2 and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
+            try:
+                conn.execute("INSTALL httpfs; LOAD httpfs;")
+                endpoint_host = R2_ENDPOINT.replace("https://", "").replace("http://", "").strip("/")
+                conn.execute(f"""
+                    SET s3_region='auto';
+                    SET s3_endpoint='{endpoint_host}';
+                    SET s3_access_key_id='{R2_ACCESS_KEY_ID}';
+                    SET s3_secret_access_key='{R2_SECRET_ACCESS_KEY}';
+                    SET s3_url_style='path';
+                """)
+                logger.info(f"DuckDB httpfs configured for Cloudflare R2 bucket: s3://{R2_BUCKET}/{R2_PREFIX}")
+            except Exception as e:
+                logger.error(f"Failed to initialize DuckDB R2 httpfs: {e}")
+
+        for table in TABLE_NAMES:
+            r2_uri = f"s3://{R2_BUCKET}/{R2_PREFIX}/{table}.parquet"
+            local_file = DATA_DIR / f"{table}.parquet"
+            created = False
+
+            if USE_R2 and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY:
+                try:
+                    conn.execute(f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet('{r2_uri}');")
+                    conn.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                    logger.info(f"Created R2 View: {table} -> {r2_uri}")
+                    created = True
+                except Exception as ve:
+                    logger.warning(f"Could not verify R2 view for {table}: {ve}")
+
+            if not created and local_file.exists():
+                try:
+                    conn.execute(f"CREATE OR REPLACE VIEW {table} AS SELECT * FROM read_parquet('{local_file}');")
+                    logger.info(f"Created Local View: {table} -> {local_file}")
+                    created = True
+                except Exception as le:
+                    logger.warning(f"Could not create local view for {table}: {le}")
+
+        # Attach local FTS database if exists
         if FTS_DB_PATH.exists():
             try:
                 conn.execute(f"ATTACH '{FTS_DB_PATH}' AS fts_db (READ_ONLY);")
@@ -36,24 +147,43 @@ def get_db_connection() -> duckdb.DuckDBPyConnection:
             except Exception as e:
                 logger.warning(f"Could not attach FTS database: {e}")
 
-        # Load SQL views if parquet files exist
-        if VIEWS_SQL_PATH.exists() and (DATA_DIR / "decisions.parquet").exists():
-            try:
-                logger.info(f"Loading SQL views from {VIEWS_SQL_PATH}")
-                conn.execute(open(VIEWS_SQL_PATH).read())
-            except Exception as e:
-                logger.warning(f"Failed to load views: {e}")
-    return conn
+        _root_conn = conn
+        _thread_safe_db = ThreadSafeDuckDB(_root_conn)
+        return _thread_safe_db
+
+
+
+def _table_exists(db: Any, table_name: str) -> bool:
+    try:
+        db.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
+def _get_table_count(db: Any, table_name: str) -> int:
+    try:
+        row = db.execute(f"SELECT count(*) FROM {table_name}").fetchone()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+
+def get_db_connection() -> ThreadSafeDuckDB:
+    global _thread_safe_db
+    if _thread_safe_db is None:
+        _init_root_connection()
+    return _thread_safe_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    get_db_connection()
+    _init_root_connection()
     yield
-    global conn
-    if conn:
-        conn.close()
-        conn = None
+    global _root_conn, _thread_safe_db
+    if _root_conn:
+        _root_conn.close()
+        _root_conn = None
+        _thread_safe_db = None
 
 
 app = FastAPI(
@@ -83,13 +213,16 @@ class HealthResponse(BaseModel):
 
 
 class StatsResponse(BaseModel):
-    total_decisions: int
-    total_paragraphs: int
-    total_citations: int
-    total_modele: int
-    total_dictionar_terms: int
-    total_ccr_decisions: int
-    total_documents: int
+    storage_provider: str = "local_disk"
+    total_decisions: int = 0
+    total_decision_paragraphs: int = 0
+    total_paragraphs: int = 0
+    total_articles: int = 0
+    total_citations: int = 0
+    total_modele: int = 0
+    total_dictionar_terms: int = 0
+    total_ccr_decisions: int = 0
+    total_documents: int = 0
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -108,30 +241,17 @@ def health_check():
 @app.get("/api/v1/stats", response_model=StatsResponse, tags=["Metadata"])
 def get_stats():
     db = get_db_connection()
-    dec_file = DATA_DIR / "decisions.parquet"
-    para_file = DATA_DIR / "decision_paragraphs.parquet"
-    rel_file = DATA_DIR / "relationships.parquet"
-    mod_file = DATA_DIR / "modele_documente.parquet"
-    dict_file = DATA_DIR / "dictionar_juridic.parquet"
-    ccr_file = DATA_DIR / "ccr_decisions.parquet"
-    doc_file = DATA_DIR / "documents.parquet"
-
-    dec_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dec_file}')").fetchone()[0] if dec_file.exists() else 0
-    para_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{para_file}')").fetchone()[0] if para_file.exists() else 0
-    rel_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{rel_file}')").fetchone()[0] if rel_file.exists() else 0
-    mod_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{mod_file}')").fetchone()[0] if mod_file.exists() else 0
-    dict_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{dict_file}')").fetchone()[0] if dict_file.exists() else 0
-    ccr_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{ccr_file}')").fetchone()[0] if ccr_file.exists() else 0
-    doc_cnt = db.execute(f"SELECT count(*) FROM read_parquet('{doc_file}')").fetchone()[0] if doc_file.exists() else 0
-
     return {
-        "total_decisions": dec_cnt,
-        "total_paragraphs": para_cnt,
-        "total_citations": rel_cnt,
-        "total_modele": mod_cnt,
-        "total_dictionar_terms": dict_cnt,
-        "total_ccr_decisions": ccr_cnt,
-        "total_documents": doc_cnt,
+        "storage_provider": "cloudflare_r2" if USE_R2 else "local_disk",
+        "total_decisions": _get_table_count(db, "decisions"),
+        "total_decision_paragraphs": _get_table_count(db, "decision_paragraphs"),
+        "total_paragraphs": _get_table_count(db, "paragraphs"),
+        "total_articles": _get_table_count(db, "articles"),
+        "total_citations": _get_table_count(db, "relationships"),
+        "total_modele": _get_table_count(db, "modele_documente"),
+        "total_dictionar_terms": _get_table_count(db, "dictionar_juridic"),
+        "total_ccr_decisions": _get_table_count(db, "ccr_decisions"),
+        "total_documents": _get_table_count(db, "documents"),
     }
 
 
@@ -665,20 +785,21 @@ def list_legislation_documents(
     issuer: str | None = Query(None, description="e.g. 'PARLAMENTUL', 'GUVERNUL', 'CURTEA CONSTITUȚIONALĂ'"),
     document_number: str | None = Query(None, description="e.g. '62', '287', '562'"),
     year: int | None = Query(None, description="Year adopted (e.g. 2024, 2025)"),
-    q: str | None = Query(None, description="Search keyword in title or content"),
+    q: str | None = Query(None, description="Search keyword in title or citation"),
     page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=100),
+    page_size: int | None = Query(None, ge=1, le=100),
 ):
-    """List and filter primary Romanian legislation from documents.parquet (over 251,000 acts)."""
+    """List and filter primary Romanian legislation from documents (over 251,000 acts)."""
+    eff_limit = page_size or limit
     db = get_db_connection()
-    doc_file = DATA_DIR / "documents.parquet"
-    if not doc_file.exists():
-        return {"count": 0, "page": page, "limit": limit, "data": []}
+    if not _table_exists(db, "documents"):
+        return {"total": 0, "count": 0, "page": page, "limit": eff_limit, "data": []}
 
     conditions = ["1=1"]
     params = []
 
-    if type:
+    if type and type != "ALL":
         conditions.append("type ILIKE ?")
         params.append(f"%{type}%")
     if issuer:
@@ -691,25 +812,29 @@ def list_legislation_documents(
         conditions.append("EXTRACT(year FROM adopted_at) = ?")
         params.append(year)
     if q:
-        conditions.append("(title ILIKE ? OR content ILIKE ?)")
+        conditions.append("(title ILIKE ? OR document_citation ILIKE ?)")
         params.extend([f"%{q}%", f"%{q}%"])
 
     where_clause = " AND ".join(conditions)
-    offset = (page - 1) * limit
+    offset = (page - 1) * eff_limit
 
     count_params = list(params)
     query = f"""
         SELECT id, type, document_number, document_citation, issuer, title, adopted_at, published_at, effective_at, gazette_number, status, link
-        FROM read_parquet('{doc_file}')
+        FROM documents
         WHERE {where_clause}
         ORDER BY adopted_at DESC NULLS LAST, id DESC
         LIMIT ? OFFSET ?
     """
-    params.extend([limit, offset])
+    params.extend([eff_limit, offset])
 
     results = db.execute(query, params).pl().to_dicts()
-    total = db.execute(f"SELECT count(*) FROM read_parquet('{doc_file}') WHERE {where_clause}", count_params).fetchone()[0]
-    return {"total": total, "count": len(results), "page": page, "limit": limit, "data": results}
+    if where_clause == "1=1":
+        total = _get_table_count(db, "documents")
+    else:
+        total = db.execute(f"SELECT count(*) FROM documents WHERE {where_clause}", count_params).fetchone()[0]
+
+    return {"total": total, "count": len(results), "page": page, "limit": eff_limit, "data": results}
 
 
 @app.get("/api/v1/documents/{document_id}", tags=["Legislație Primară"])

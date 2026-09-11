@@ -1,160 +1,297 @@
--- =============================================================================
--- Views and helper macros for Romanian High Court of Cassation & Justice (ÎCCJ),
--- Legal Document Templates (Modele de Acte), and Legal Dictionary (Dicționar Juridic)
--- Compatible with DuckDB and Parquet storage
--- =============================================================================
+-- ============================================================================
+-- LLM-facing surface for the Romanian legal corpus.
+--
+-- Mental model: three concentric levels of legal text, each with a citation
+-- string at that level. Naming follows `<level>_<role>` so every column says
+-- which level it describes:
+--
+--   document   — a whole law, code, OUG, hotărâre, decizie, etc.
+--   article    — one article inside a document  (parent: document)
+--   paragraph  — one paragraph inside an article (parent: article, ancestor: document)
+--
+-- Each level has its own table and its own citation column:
+--   documents.document_citation             "Codul Penal", "Legea 287/2009", "OUG 100/2024"
+--   articles.article_citation     "Art. 188", "Art. 188 bis", "Art. 188^1"
+--   paragraphs.paragraph_citation   "Art. 188 alin. (1)" (includes parent article)
+--
+-- `articles` and `paragraphs` are pre-JOIN-ed: each row already carries its
+-- parent document's citation + link, so a single SELECT returns everything needed
+-- to compose a chip citation in the answer. No manual JOIN required.
+--
+-- Subject views (constitution, civil_code, penal_code, ...) are filters on
+-- `documents` that select the single forma-în-vigoare row of each code. Use them
+-- to scope an article/paragraph query to a specific code:
+--   WHERE document_id IN (SELECT id FROM penal_code)
+-- ============================================================================
 
--- Base table views pointing to local or remote Parquet files
-CREATE OR REPLACE VIEW decisions AS 
-SELECT * FROM read_parquet('data/decisions.parquet');
 
-CREATE OR REPLACE VIEW decision_paragraphs AS 
-SELECT * FROM read_parquet('data/decision_paragraphs.parquet');
+-- ────────────────────────────────────────────────────────────────────────────
+-- DOCUMENTS — un rând per act normativ
+-- ────────────────────────────────────────────────────────────────────────────
 
-CREATE OR REPLACE VIEW relationships AS 
-SELECT * FROM read_parquet('data/relationships.parquet');
+CREATE OR REPLACE VIEW documents AS
+SELECT
+    id,
+    type,
+    document_number,
+    document_citation,
+    issuer,
+    title,
+    content,
+    adopted_at,
+    published_at,
+    effective_at,
+    gazette_number,
+    status,
+    link
+FROM read_parquet(['data/documents.parquet', 'data/incremental/documents_*.parquet'], union_by_name=True);
 
--- Modele de Documente Juridice (legeaz.net)
-CREATE OR REPLACE VIEW modele_documente AS 
-SELECT * FROM read_parquet('data/modele_documente.parquet');
+COMMENT ON VIEW documents IS
+'Acte normative din corpusul juridic român. Sursa: legislatie.just.ro (Ministerul Justiției). Un rând per act distinct. Acoperă LEGI, ORDONANȚE (OUG, OG), HOTĂRÂRI DE GUVERN (HG), ORDINE ministeriale, DECRETE prezidențiale, DECIZII și HOTĂRÂRI ale Curții Constituționale (CCR) și ÎCCJ, plus documente conexe (RAPORT, COMUNICAT, RECTIFICARE, CUANTUM TOTAL) și codurile (CODUL CIVIL, CODUL PENAL, CONSTITUȚIE, etc.). Pentru regăsire la nivel de articol sau alineat, NU JOIN-ui manual cu articles / paragraphs — interoghează direct view-urile articles / paragraphs, care includ deja contextul actului (document_citation, link).';
 
--- Dicționar Juridic DEX (legeaz.net)
-CREATE OR REPLACE VIEW dictionar_juridic AS 
-SELECT * FROM read_parquet('data/dictionar_juridic.parquet');
+COMMENT ON COLUMN documents.id IS
+'Cheie primară surogat, generată de pipeline. Referită de articles.document_id (intern, deja JOIN-uit în view).';
 
--- =============================================================================
--- Legislation Liaison (Bidirectional Citation & Relationship Graph)
--- =============================================================================
+COMMENT ON COLUMN documents.type IS
+'Tipul actului așa cum este clasificat în Monitorul Oficial. Valori frecvente: LEGE, ORDONANȚĂ DE URGENȚĂ, ORDONANȚĂ, HOTĂRÂRE, ORDIN, DECRET, DECIZIE, ÎNCHEIERE, SENTINȚĂ, COMUNICAT, RAPORT, RECTIFICARE, CUANTUM TOTAL, NORMĂ, METODOLOGIE, REGULAMENT, INSTRUCȚIUNI, CIRCULARĂ, ANEXĂ, CONSTITUȚIE, CODUL CIVIL, CODUL PENAL etc. Acesta este principalul câmp pentru filtrarea după natura documentului.';
 
--- 1. Given a decision, list all referenced normative acts, codes, and articles
-CREATE OR REPLACE VIEW decision_to_legislation_view AS
-SELECT 
-    d.id AS decision_id,
-    d.decision_number,
-    d.decision_date,
-    d.docket_number,
-    d.department,
-    r.target_type,
-    r.act_type,
-    r.act_number,
-    r.act_year,
-    r.article_number,
-    r.paragraph_number,
-    r.annex,
-    r.chapter,
-    r.canonical_citation,
-    r.relationship_type
-FROM decisions d
-JOIN relationships r ON d.id = r.source_decision_id;
+COMMENT ON COLUMN documents.document_number IS
+'Numărul actului în formă brută, exact cum vine din SOAP-ul legislatie.just.ro: de obicei doar numărul ("287", "75"), uneori "număr/an" ("286/2009"). NULL pentru documente fără număr distinct (CODURI și CONSTITUȚIE, COMUNICAT-uri ÎCCJ, RAPORT-uri, CUANTUM TOTAL, RECTIFICARI). NU folosi această coloană pentru lookup după citarea folosită de juriști — pentru asta folosește document_citation.';
 
--- 2. Given a law, code, or article, list all court decisions citing or applying it
-CREATE OR REPLACE VIEW legislation_to_decisions_view AS
-SELECT 
-    r.canonical_citation,
-    r.target_type,
-    r.act_type,
-    r.act_number,
-    r.act_year,
-    r.article_number,
-    r.paragraph_number,
-    r.annex,
-    r.chapter,
-    d.id AS decision_id,
-    d.decision_number,
-    d.decision_date,
-    d.docket_number,
-    d.department,
-    d.solution_type,
-    d.summary,
-    d.link
-FROM relationships r
-JOIN decisions d ON r.source_decision_id = d.id;
+COMMENT ON COLUMN documents.document_citation IS
+'Citarea canonică a actului în forma în care o folosesc juriștii români: "Legea 287/2009", "OUG 57/2019", "HG 395/2016", "Decizia CCR 458/2020", "Ordinul 1578/2016", "Decretul 317/2026", "Constituția României", "Codul Civil", "Codul Penal". GENERATĂ automat de pipeline pentru 100% din acte. ACEASTA ESTE COLOANA DE FOLOSIT pentru a afișa titlul scurt al actului și pentru lookup după citare. NULL doar pentru acte vechi unde lipsesc numărul și anul.';
 
--- =============================================================================
--- Domain Views (Specialized Court Sections / Secții ÎCCJ)
--- =============================================================================
+COMMENT ON COLUMN documents.issuer IS
+'Autoritatea emitentă: PARLAMENTUL, GUVERNUL, CURTEA CONSTITUȚIONALĂ, ÎNALTA CURTE DE CASAȚIE ȘI JUSTIȚIE, MINISTERUL FINANȚELOR, etc.';
 
--- Secția I Civilă (Civil Law Section I)
-CREATE OR REPLACE VIEW civil_section_1 AS
-SELECT * FROM decisions 
-WHERE department ILIKE '%Civilă I%' OR department ILIKE '%I Civilă%';
+COMMENT ON COLUMN documents.title IS
+'Titlul complet oficial al actului, inclusiv preambulul descriptiv.';
 
--- Secția a II-a Civilă (Commercial & Company Law / Secția a II-a Civilă)
-CREATE OR REPLACE VIEW civil_section_2 AS
-SELECT * FROM decisions 
-WHERE department ILIKE '%Civilă II%' OR department ILIKE '%II-a Civilă%';
+COMMENT ON COLUMN documents.content IS
+'Textul integral al actului normativ. Pentru căutare granulară la nivel de articol sau alineat folosește view-urile articles / paragraphs.';
 
--- Secția Penală (Criminal Law Section)
-CREATE OR REPLACE VIEW penal_section AS
-SELECT * FROM decisions 
-WHERE department ILIKE '%Penal%';
+COMMENT ON COLUMN documents.adopted_at IS
+'Data adoptării sau emiterii actului (format DATE: YYYY-MM-DD).';
 
--- Secția de Contencios Administrativ și Fiscal (Administrative & Tax Section)
-CREATE OR REPLACE VIEW administrative_fiscal_section AS
-SELECT * FROM decisions 
-WHERE department ILIKE '%Contencios%' OR department ILIKE '%Fiscal%';
+COMMENT ON COLUMN documents.published_at IS
+'Data publicării în Monitorul Oficial (format DATE: YYYY-MM-DD).';
 
--- =============================================================================
--- High-Value Binding Jurisprudence (RIL & Hotărâri Prealabile)
--- =============================================================================
+COMMENT ON COLUMN documents.effective_at IS
+'Data intrării în vigoare (format DATE: YYYY-MM-DD), conform regulii standard de 3 zile de la publicare sau conform termenului specific din act.';
 
--- Recursuri în Interesul Legii (Appeals in the Interest of Law - Binding Case Law)
-CREATE OR REPLACE VIEW ril_decisions AS
-SELECT * FROM decisions 
-WHERE document_type ILIKE '%recurs în interesul legii%' 
-   OR summary ILIKE '%recurs în interesul legii%'
-   OR keywords ILIKE '%RIL%';
+COMMENT ON COLUMN documents.gazette_number IS
+'Numărul Monitorului Oficial în care a fost publicat actul. NULL dacă nu este disponibil.';
 
--- Hotărâri Prealabile pentru dezlegarea unor chestiuni de drept (Preliminary Rulings)
-CREATE OR REPLACE VIEW hp_decisions AS
-SELECT * FROM decisions 
-WHERE document_type ILIKE '%hotărâre prealabilă%' 
-   OR summary ILIKE '%dezlegarea unor chestiuni de drept%'
-   OR keywords ILIKE '%hotarare prealabila%';
+COMMENT ON COLUMN documents.status IS
+'Starea actului în ciclul său de viață: "în vigoare", "abrogat" (abrogat de un alt act, fără repunere ulterioară) sau "suspendat". Derivată din acțiunile suferite de act (endpoint-ul actiuniSuferite de pe legislatie.just.ro). ACEASTA ESTE COLOANA care răspunde la "mai este actul în vigoare?" — un act poate exista în corpus dar să fie abrogat. Pentru a exclude legislația moartă: `WHERE status = ''în vigoare''`. NULL = stare necunoscută (datele de stare nu au fost preluate pentru acest act). Atenție: reflectă consolidarea Ministerului Justiției, care poate avea întârzieri de zile/săptămâni față de Monitorul Oficial.';
 
--- Recent Rulings (Last 12 Months)
-CREATE OR REPLACE VIEW recent_decisions AS
-SELECT * FROM decisions 
-WHERE decision_date >= (CURRENT_DATE - INTERVAL 1 YEAR)
-ORDER BY decision_date DESC;
+COMMENT ON COLUMN documents.link IS
+'URL absolut către pagina actului pe legislatie.just.ro. Format: http://legislatie.just.ro/Public/DetaliiDocument/{id}. Aceeași valoare apare și în articles.link / paragraphs.link pentru actul-părinte, ca să poți construi link-ul de citare direct dintr-o singură interogare la nivel de articol sau alineat.';
 
--- =============================================================================
--- Specialized Views for Modele de Documente
--- =============================================================================
 
--- Modele de Contracte (Vânzare, Închiriere, Împrumut, Donație, Cesiune, etc.)
-CREATE OR REPLACE VIEW modele_contracte AS
-SELECT * FROM modele_documente
-WHERE category = 'Contracte';
+-- ────────────────────────────────────────────────────────────────────────────
+-- ARTICLES — un rând per articol, JOIN-uit deja cu actul-părinte
+-- ────────────────────────────────────────────────────────────────────────────
 
--- Modele de Cereri & Acțiuni în Justiție
-CREATE OR REPLACE VIEW modele_cereri_justitie AS
-SELECT * FROM modele_documente
-WHERE category = 'Cereri & Acțiuni în Justiție' OR category = 'Plângeri & Contestații';
+CREATE OR REPLACE VIEW articles AS
+SELECT
+    ar.id,
+    ar.document_id,
+    a.document_citation,
+    a.status,
+    a.link,
+    ar.article_number,
+    ar.article_variant,
+    ar.article_citation,
+    ar.content
+FROM read_parquet(['data/articles.parquet', 'data/incremental/articles_*.parquet'], union_by_name=True) ar
+JOIN documents a ON a.id = ar.document_id;
 
--- Modele Succesiuni & Moșteniri
-CREATE OR REPLACE VIEW modele_succesiuni AS
-SELECT * FROM modele_documente
-WHERE category = 'Succesiuni & Testamente';
+COMMENT ON VIEW articles IS
+'Articolele extrase din fiecare act. Un rând per articol. Vine JOIN-uit deja cu actul-părinte: document_citation și link sunt incluse direct, nu trebuie să faci JOIN cu documents. Pentru actele care nu sunt structurate pe articole (decizii, comunicate, rapoarte), un singur rând cu article_number IS NULL și content egal cu textul întreg al actului. Pentru regăsire la nivel de alineat folosește view-ul paragraphs.';
 
--- Modele Dreptul Familiei (Convenții matrimoniale, divorț, tutelă)
-CREATE OR REPLACE VIEW modele_familie AS 
-SELECT * FROM modele_documente
-WHERE category = 'Dreptul Familiei';
+COMMENT ON COLUMN articles.id IS
+'Cheie primară surogat. Referită de paragraphs.article_id (intern, deja JOIN-uit în view-ul paragraphs).';
 
--- =============================================================================
--- Curtea Constituțională a României (CCR Jurisprudence Views)
--- =============================================================================
+COMMENT ON COLUMN articles.document_id IS
+'FK către documents.id. Folosește-o pentru a restrânge la articolele unui anume act, ex: `WHERE document_id IN (SELECT id FROM penal_code)`.';
 
-CREATE OR REPLACE VIEW ccr_decisions AS 
-SELECT * FROM read_parquet('data/ccr_decisions.parquet');
+COMMENT ON COLUMN articles.document_citation IS
+'Citarea actului-părinte (preluată din documents.document_citation). Pereche cu `link` formează chip-ul de citare în răspuns. Exemple: "Codul Penal", "Legea 287/2009". Vezi documents.document_citation pentru semantică completă.';
 
--- Decizii de Admitere CCR (Neconstituționalitate admisă)
-CREATE OR REPLACE VIEW decizii_admitere_ccr AS 
-SELECT * FROM ccr_decisions
-WHERE category = 'Decizii de admitere' OR summary ILIKE '%admite%' OR title ILIKE '%admitere%';
+COMMENT ON COLUMN articles.status IS
+'Starea actului-părinte (preluată din documents.status): "în vigoare", "abrogat" sau "suspendat". Filtrează articolele din legislația moartă: `WHERE status = ''în vigoare''`. Vezi documents.status pentru semantică completă. NULL = stare necunoscută.';
 
--- Hotărâri CCR (Validare alegeri, interimat președinte, etc.)
-CREATE OR REPLACE VIEW hotarari_ccr AS 
-SELECT * FROM ccr_decisions
-WHERE act_type = 'HOTĂRÂRE';
+COMMENT ON COLUMN articles.link IS
+'URL-ul actului-părinte pe legislatie.just.ro (preluat din documents.link). Folosit împreună cu document_citation pentru a construi link markdown în răspuns.';
+
+COMMENT ON COLUMN articles.article_number IS
+'Numărul articolului ca întreg ordinal (188 pentru "art. 188", "Art. 188", "Articolul 188"). Pentru articolele cu variantă (188 bis, 188^1), numărul de bază stă aici și sufixul în article_variant. NULL doar pentru actele nestructurate pe articles.';
+
+COMMENT ON COLUMN articles.article_variant IS
+'Sufixul de variantă al articolului, când există. Valori observate: "bis", "ter", "quater", "quinquies", "sexies", "septies", "octies" (notație latină), sau "^1", "^2", "^3" ... (notație indice). NULL pentru articolele standard. Permite distincția între "Art. 188", "Art. 188 bis" și "Art. 188^1" — articole DIFERITE introduse ulterior între numere consecutive fără renumerotare.';
+
+COMMENT ON COLUMN articles.article_citation IS
+'Citarea articolului în forma în care o scrie un jurist român, gata de afișat: "Art. 188", "Art. 188 bis", "Art. 188^1". Conține DOAR referința articolului — actul-părinte stă în document_citation. Pentru actele nestructurate conține valoarea literal "(unparsed)".';
+
+COMMENT ON COLUMN articles.content IS
+'Textul integral al articolului — toate alineatele concatenate, în ordine. Pentru regăsire mai fină pe alineat, folosește view-ul paragraphs.';
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- PARAGRAPHS — un rând per alineat, JOIN-uit deja cu actul-părinte
+-- ────────────────────────────────────────────────────────────────────────────
+
+CREATE OR REPLACE VIEW paragraphs AS
+SELECT
+    al.id,
+    al.article_id,
+    ar.document_id,
+    a.document_citation,
+    a.status,
+    a.link,
+    ar.article_number,
+    ar.article_variant,
+    ar.article_citation,
+    al.paragraph_number,
+    al.paragraph_citation,
+    al.content
+FROM read_parquet(['data/paragraphs.parquet', 'data/incremental/paragraphs_*.parquet'], union_by_name=True) al
+JOIN articles ar ON ar.id = al.article_id
+JOIN documents a ON a.id = ar.document_id;
+
+COMMENT ON VIEW paragraphs IS
+'Alineatele extrase din fiecare articol. Un rând per alineat. ACEASTA ESTE UNITATEA CEA MAI FINĂ DE CITARE — corespunde cu "art. 188 alin. (1)" din practica juridică. Vine JOIN-uit deja cu actul-părinte și articolul-părinte: document_citation, link și article_citation sunt incluse direct. Pentru articolele monolitice (fără alineate distincte (1), (2), (3) ...), conține un singur rând cu paragraph_number IS NULL și content egal cu articolul întreg.';
+
+COMMENT ON COLUMN paragraphs.id IS
+'Cheie primară surogat.';
+
+COMMENT ON COLUMN paragraphs.article_id IS
+'FK către articles.id. Folosește-o când vrei să iei toate alineatele unui articol specific.';
+
+COMMENT ON COLUMN paragraphs.status IS
+'Starea actului-părinte (preluată din documents.status): "în vigoare", "abrogat" sau "suspendat". Filtrează alineatele din legislația moartă: `WHERE status = ''în vigoare''`. Vezi documents.status pentru semantică completă. NULL = stare necunoscută.';
+
+COMMENT ON COLUMN paragraphs.document_id IS
+'FK către documents.id (transitiv prin articole). Folosește-o pentru a restrânge la alineatele dintr-un anume act, ex: `WHERE document_id IN (SELECT id FROM penal_code)`.';
+
+COMMENT ON COLUMN paragraphs.document_citation IS
+'Citarea actului-părinte. Pereche cu `link` formează chip-ul de citare în răspuns.';
+
+COMMENT ON COLUMN paragraphs.link IS
+'URL-ul actului-părinte pe legislatie.just.ro.';
+
+COMMENT ON COLUMN paragraphs.article_number IS
+'Numărul articolului-părinte (preluat din articles.article_number). Folosește-l ca să filtrezi alineatele unui articol specific: `WHERE article_number = 188`.';
+
+COMMENT ON COLUMN paragraphs.article_variant IS
+'Sufixul de variantă al articolului-părinte (preluat din articles.article_variant), ex: "bis", "^1". NULL pentru articolele standard.';
+
+COMMENT ON COLUMN paragraphs.article_citation IS
+'Citarea articolului-părinte (ex: "Art. 188"). Coloană suplimentară față de paragraph_citation, în cazul în care vrei doar referința articolului, nu și a alineatului.';
+
+COMMENT ON COLUMN paragraphs.paragraph_number IS
+'Numărul alineatului (1, 2, 3 ...) — exact numărul din "(1)", "(2)", "(3)". NULL = articolul nu este împărțit în alineate; conținutul rândului este articolul în întregime.';
+
+COMMENT ON COLUMN paragraphs.paragraph_citation IS
+'Citarea completă a alineatului în forma juridică românească: "Art. 188 alin. (1)". Include și referința articolului. Pentru articolele fără alineate (paragraph_number IS NULL), egal cu citarea articolului (ex: "Art. 188").';
+
+COMMENT ON COLUMN paragraphs.content IS
+'Textul alineatului, fără markeri inițiali "(N)". Pentru articolele fără alineate, textul articolului întreg.';
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- VIEW-URI PE COD — selectează forma în vigoare pentru fiecare cod și pentru Constituție
+-- ────────────────────────────────────────────────────────────────────────────
+-- Fiecare cod român major are un view dedicat care selectează singurul rând
+-- (forma în vigoare) din `documents`. Folosește-le pentru a restrânge un query la
+-- nivel de articol sau alineat la un anume cod:
+--   WHERE document_id IN (SELECT id FROM penal_code)
+--
+-- legislatie.just.ro stochează fiecare cod consolidat sub un TipAct dedicat
+-- (CODUL CIVIL, CODUL PENAL, etc.), nu sub LEGE. View-urile pe cod filtrează
+-- pe TipAct + anul adoptării. Codurile cu mai multe republicări (cod proc.
+-- civilă) sunt dezambiguate selectând rândul cu cel mai mult conținut.
+
+CREATE OR REPLACE VIEW constitution AS
+SELECT * FROM documents
+ WHERE type = 'CONSTITUȚIE'
+   AND EXTRACT(YEAR FROM adopted_at) = 1991
+   AND title ILIKE '%republicat%';
+
+COMMENT ON VIEW constitution IS
+'Constituția României în vigoare. Forma republicată în 2003. Un singur rând. Pentru articole specifice, folosește `WHERE document_id IN (SELECT id FROM constitution)` în view-ul articles.';
+
+
+CREATE OR REPLACE VIEW civil_code AS
+SELECT * FROM documents
+ WHERE type = 'CODUL CIVIL'
+   AND EXTRACT(YEAR FROM adopted_at) = 2009
+   AND title ILIKE '%republicat%';
+
+COMMENT ON VIEW civil_code IS
+'Codul Civil al României în vigoare. Sursa: Legea nr. 287/2009, republicată. Reglementează raporturile civile între persoane: contracte, obligații, drepturi reale, succesiuni, familie. Un singur rând.';
+
+
+CREATE OR REPLACE VIEW penal_code AS
+SELECT * FROM documents
+ WHERE type = 'CODUL PENAL'
+   AND EXTRACT(YEAR FROM adopted_at) = 2009;
+
+COMMENT ON VIEW penal_code IS
+'Codul Penal al României în vigoare. Sursa: Legea nr. 286/2009. Definește infracțiunile, pedepsele și răspunderea penală. Un singur rând.';
+
+
+CREATE OR REPLACE VIEW labor_code AS
+SELECT * FROM documents
+ WHERE type = 'CODUL MUNCII'
+   AND EXTRACT(YEAR FROM adopted_at) = 2003
+   AND title ILIKE '%republicat%';
+
+COMMENT ON VIEW labor_code IS
+'Codul Muncii al României în vigoare. Sursa: Legea nr. 53/2003, republicată. Reglementează raporturile individuale și colective de muncă. Un singur rând.';
+
+
+CREATE OR REPLACE VIEW civil_procedure_code AS
+SELECT * FROM documents
+ WHERE type = 'CODUL DE PROCEDURĂ CIVILĂ'
+   AND EXTRACT(YEAR FROM adopted_at) = 2010
+   AND title ILIKE '%republicat%'
+ ORDER BY LENGTH(content) DESC
+ LIMIT 1;
+
+COMMENT ON VIEW civil_procedure_code IS
+'Codul de Procedură Civilă al României în vigoare. Sursa: Legea nr. 134/2010, republicată. Reglementează procedura judecății în materie civilă. Un singur rând (versiunea cu cel mai mult conținut, dintre republicări).';
+
+
+CREATE OR REPLACE VIEW penal_procedure_code AS
+SELECT * FROM documents
+ WHERE type = 'CODUL DE PROCEDURĂ PENALĂ'
+   AND EXTRACT(YEAR FROM adopted_at) = 2010;
+
+COMMENT ON VIEW penal_procedure_code IS
+'Codul de Procedură Penală al României în vigoare. Sursa: Legea nr. 135/2010. Reglementează procedura judecății în materie penală. Un singur rând.';
+
+
+CREATE OR REPLACE VIEW tax_code AS
+SELECT * FROM documents
+ WHERE type = 'CODUL FISCAL'
+   AND EXTRACT(YEAR FROM adopted_at) = 2015;
+
+COMMENT ON VIEW tax_code IS
+'Codul Fiscal al României în vigoare. Sursa: Legea nr. 227/2015. Reglementează impozitele, taxele și contribuțiile sociale. Un singur rând.';
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- JURISPRUDENȚĂ
+-- ────────────────────────────────────────────────────────────────────────────
+
+CREATE OR REPLACE VIEW case_law AS
+SELECT *
+  FROM documents
+ WHERE type IN ('DECIZIE', 'HOTĂRÂRE', 'ÎNCHEIERE', 'SENTINȚĂ')
+   AND (issuer LIKE 'CURTEA CONSTITUȚIONALĂ%'
+        OR issuer LIKE 'ÎNALTA CURTE DE CASAȚIE ȘI JUSTIȚIE%');
+
+COMMENT ON VIEW case_law IS
+'Hotărâri și decizii ale instanțelor supreme din România: Curtea Constituțională (CCR) și Înalta Curte de Casație și Justiție (ÎCCJ, inclusiv secțiile sale). Filtru pe type IN (DECIZIE, HOTĂRÂRE, ÎNCHEIERE, SENTINȚĂ) ȘI issuer corespunzător. NU include actele administrative ale acestor instanțe (COMUNICAT, RAPORT). Pentru paragrafele unei decizii folosește view-ul paragraphs cu `WHERE document_id IN (SELECT id FROM case_law WHERE ...)`.';

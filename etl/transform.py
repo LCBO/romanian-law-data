@@ -27,7 +27,7 @@ def parse_date(date_str: str | None) -> date | None:
 
 
 def run_transform():
-    raw_files = list(RAW_DATA_DIR.glob("*.parquet"))
+    raw_files = [f for f in RAW_DATA_DIR.glob("*.parquet") if not f.name.startswith("raw_legislatie_")]
     if not raw_files:
         logger.warning("No raw parquet files found to transform.")
         return

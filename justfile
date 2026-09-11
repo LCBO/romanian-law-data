@@ -26,6 +26,13 @@ extract-dictionar pages="104":
 extract-ccr pages="":
     uv run python -m etl.extract_ccr {{ if pages != "" { "--max-pages " + pages } else { "" } }}
 
+# Incremental legislation extraction from legislatie.just.ro (DOM parser)
+extract-legislatie from="" to="" limit="" delay="0.8":
+    uv run python -m etl.extract_legislatie {{ if from != "" { "--from-date " + from } else { "" } }} {{ if to != "" { "--to-date " + to } else { "" } }} {{ if limit != "" { "--limit " + limit } else { "" } }} --delay {{delay}}
+
+# Start or reload all background services via PM2
+pm2-start:
+    pm2 start ecosystem.config.cjs
 
 # Run ETL transform (cleans, parses citations, validates with Pandera, outputs parquet)
 transform:
@@ -34,6 +41,10 @@ transform:
 # Build DuckDB BM25 Full-Text Search index
 fts:
     uv run python -m etl.fts
+
+# Fetch latest release datasets from GitHub and upload to R2
+fetch-release:
+    uv run python -m etl.fetch_release
 
 # Sync parquet dataset and FTS to Cloudflare R2
 sync-r2:

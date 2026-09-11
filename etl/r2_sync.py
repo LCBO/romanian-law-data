@@ -71,6 +71,15 @@ def sync_to_r2(bucket_name: str | None = None, prefix: str = "", files: list[str
         logger.warning("No files found to upload to R2.")
         return True
 
+    from boto3.s3.transfer import TransferConfig
+
+    transfer_config = TransferConfig(
+        multipart_threshold=32 * 1024 * 1024,
+        max_concurrency=10,
+        multipart_chunksize=32 * 1024 * 1024,
+        use_threads=True,
+    )
+
     success_count = 0
     for local_path in files_to_upload:
         if not local_path.exists() or local_path.is_dir():
@@ -78,27 +87,33 @@ def sync_to_r2(bucket_name: str | None = None, prefix: str = "", files: list[str
 
         filename = local_path.name
         remote_key = f"{prefix}/{filename}".lstrip("/") if prefix else filename
-        logger.info(f"Uploading {local_path} -> s3://{bucket}/{remote_key} ({local_path.stat().st_size / (1024*1024):.2f} MB)...")
-        
+        size_mb = local_path.stat().st_size / (1024 * 1024)
+        logger.info(f"Uploading {local_path} -> s3://{bucket}/{remote_key} ({size_mb:.2f} MB)...")
+
         content_type = "application/octet-stream"
         if filename.endswith(".parquet"):
             content_type = "application/vnd.apache.parquet"
-        elif filename.endswith(".sql"):
+        elif filename.endswith(".sql") or filename.endswith(".sha256") or filename.endswith(".txt"):
             content_type = "text/plain"
         elif filename.endswith(".duckdb"):
             content_type = "application/x-duckdb"
+        elif ".zst" in filename:
+            content_type = "application/zstd"
+        elif filename.endswith(".json"):
+            content_type = "application/json"
 
         try:
             client.upload_file(
                 str(local_path),
                 bucket,
                 remote_key,
+                Config=transfer_config,
                 ExtraArgs={
                     "ContentType": content_type,
                     "CacheControl": "public, max-age=86400",
                 },
             )
-            logger.info(f"Uploaded {filename} successfully.")
+            logger.info(f"Uploaded {filename} successfully ({size_mb:.2f} MB).")
             success_count += 1
         except Exception as e:
             logger.error(f"Failed to upload {filename}: {e}")
